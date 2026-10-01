@@ -1,14 +1,69 @@
 /**
  * 开关链路诊断脚本（开发自测）。
  * 逐一验证：悬浮球点击 / 消息切换 / storage 同步 三条开关路径是否生效。
+ *
+ * v1.2.0：词库已移到 service worker，本测试同样真实启动 background.js
+ * 并代理 sendMessage，保证"开关 + 查词"在同一套真实装配下被验证。
  */
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 const { JSDOM } = require("jsdom");
 
 const DIR = __dirname;
-const dictSrc = fs.readFileSync(path.join(DIR, "dict.js"), "utf8");
 const contentSrc = fs.readFileSync(path.join(DIR, "content.js"), "utf8");
+
+// ---------------- 启动真实后台 ----------------
+function createWorker() {
+  let messageHandler = null;
+  let ctx = null;
+  const sandbox = {
+    console,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    Promise, Map, Set, Object, Array, String, Number, Error, JSON,
+  };
+  sandbox.importScripts = function () {
+    Array.prototype.slice.call(arguments).forEach(n => {
+      const p = path.join(DIR, n);
+      if (!fs.existsSync(p)) throw new Error("importScripts 目标不存在: " + n);
+      vm.runInContext(fs.readFileSync(p, "utf8"), ctx, { filename: n });
+    });
+  };
+  sandbox.chrome = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener(fn) { messageHandler = fn; } },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+    },
+    contextMenus: { removeAll(cb) { cb && cb(); }, create() {}, onClicked: { addListener() {} } },
+    commands: { onCommand: { addListener() {} } },
+    tabs: { query(_q, cb) { cb && cb([]); }, sendMessage(_i, _m, cb) { cb && cb(); } },
+    storage: { sync: { get(d, cb) { cb && cb(d); }, set(_p, cb) { cb && cb(); } } },
+  };
+  sandbox.fetch = () => Promise.reject(new Error("offline test"));
+  sandbox.AbortController = function () { this.signal = {}; this.abort = function () {}; };
+
+  ctx = vm.createContext(sandbox);
+  sandbox.sandboxImportScripts = sandbox.importScripts;
+  vm.runInContext(
+    fs.readFileSync(path.join(DIR, "background.js"), "utf8")
+      .replace(/^importScripts\(/m, "sandboxImportScripts("),
+    ctx,
+    { filename: "background.js" }
+  );
+
+  return {
+    dispatch(msg) {
+      return new Promise((resolve, reject) => {
+        if (typeof messageHandler !== "function") return reject(new Error("后台未注册监听器"));
+        const t = setTimeout(() => reject(new Error("后台响应超时: " + msg.type)), 2000);
+        messageHandler(msg, { id: "test" }, resp => { clearTimeout(t); resolve(resp); });
+      });
+    },
+  };
+}
+const worker = createWorker();
 
 const dom = new JSDOM(
   `<!DOCTYPE html><html><body><p id="p1">efficiency approach implementation</p></body></html>`,
@@ -37,11 +92,12 @@ const chromeMock = {
     lastError: null,
     sendMessage(msg, cb) {
       sentToBackground.push(msg);
-      if (msg && msg.type === "HT_TRANSLATE") {
-        setTimeout(() => cb && cb({ ok: false, error: "offline" }), 3);
-      } else if (cb) {
-        setTimeout(() => cb({ ok: true }), 0);
-      }
+      // 真实转发给后台（HT_LOOKUP / HT_DICT_INFO 都会走到这里）
+      worker.dispatch(msg).then(resp => {
+        if (cb) setTimeout(() => cb(resp), 0);
+      }).catch(() => {
+        if (cb) setTimeout(() => cb(undefined), 0);
+      });
       return Promise.resolve();
     },
     onMessage: { addListener(fn) { onMessageListeners.push(fn); } }
@@ -63,15 +119,14 @@ global.Node = window.Node;
 global.HTMLElement = window.HTMLElement;
 global.getComputedStyle = window.getComputedStyle;
 
-// 按 manifest 声明顺序把词库与内容脚本注入同一作用域，
-// 复刻真实浏览器的注入模型（不手工注入词库，避免掩盖装配缺陷）。
-const dictExtraSrc = fs.existsSync(path.join(DIR, "dict-extra.js"))
-  ? fs.readFileSync(path.join(DIR, "dict-extra.js"), "utf8")
-  : "var DICT_EXTRA = {};";
+// 按 manifest 声明顺序注入（v1.2.0 起内容脚本只有 content.js）。
 const manifest = JSON.parse(fs.readFileSync(path.join(DIR, "manifest.json"), "utf8"));
-const fileMap = { "dict.js": dictSrc, "dict-extra.js": dictExtraSrc, "content.js": contentSrc };
+const fileMap = { "content.js": contentSrc };
 const bootstrapped = manifest.content_scripts[0].js.map(f => {
-  if (!(f in fileMap)) throw new Error("manifest 注入了未知文件：" + f);
+  if (!(f in fileMap)) {
+    throw new Error("manifest 注入了本测试不认识的脚本：" + f +
+      "（v1.2.0 起内容脚本应只有 content.js）");
+  }
   return "/* ==== " + f + " ==== */\n" + fileMap[f];
 }).join("\n;\n");
 new Function("window", "document", "chrome", "Node", "globalThis", bootstrapped)(
@@ -95,11 +150,16 @@ async function hover(el, word) {
   const i = node.nodeValue.indexOf(word);
   hoverTarget = { node, offset: i + 1 };
   el.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 50, clientY: 50 }));
-  await sleep(150);
+  // 比 v1.1 略长：现在查询要走一次 chrome.runtime 消息往返（后台查词）
+  await sleep(200);
 }
 const bubbleVisible = () => {
   const b = document.querySelector(".ht-bubble");
   return !!b && b.classList.contains("ht-show");
+};
+const bubbleText = () => {
+  const b = document.querySelector(".ht-bubble");
+  return b ? b.textContent : "";
 };
 
 (async function run() {
@@ -112,6 +172,21 @@ const bubbleVisible = () => {
   const ball = document.querySelector(".ht-ball");
   check("悬浮球已注入", !!ball);
   if (!ball) { console.log(log.join("\n")); process.exit(1); }
+
+  // ---------- 路径 0：查词链路走后台 ----------
+  console.log("\n[路径 0] 离线查词是否经后台（v1.2.0 新链路）");
+  await hover(p1, "efficiency");
+  check("悬停 efficiency 弹出气泡", bubbleVisible());
+  check("气泡显示后台返回的释义（含「效率」）", bubbleText().includes("效率"),
+    bubbleText().slice(0, 80));
+  check("确实发出了 HT_LOOKUP 消息",
+    sentToBackground.some(m => m.type === "HT_LOOKUP"),
+    "已发消息类型：" + JSON.stringify([...new Set(sentToBackground.map(m => m.type))]));
+  check("本地命中时不再发在线请求（HT_TRANSLATE 未发出）",
+    !sentToBackground.some(m => m.type === "HT_TRANSLATE"));
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
 
   // ---------- 路径 A：悬浮球点击 ----------
   console.log("\n[路径 A] 悬浮球点击");

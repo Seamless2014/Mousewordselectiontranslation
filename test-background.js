@@ -1,0 +1,276 @@
+/**
+ * 后台 Service Worker 查词测试（开发自测，无依赖）。
+ *
+ * 目的：v1.2.0 把词库搬到后台后，"装配"从 manifest 挪到了 importScripts，
+ * 成了新的易错点。本脚本在 Node 里模拟 worker 环境（提供 importScripts /
+ * chrome.runtime.onMessage / chrome.contextMenus 等），真实执行 background.js，
+ * 然后像内容脚本那样发消息查词，端到端验证：
+ *
+ *   1. importScripts 三个文件后 LOCAL_DICT / DICT_EXTRA / lookupLocal 均可用
+ *   2. HT_LOOKUP 能正确返回精选词条、扩展词条、词形还原结果
+ *   3. HT_DICT_INFO 返回的词条数与词库文件实际条目数一致
+ *   4. 查不到的词返回 found:false（交由内容脚本走在线兜底）
+ *   5. 空词 / 异常输入不崩溃
+ *   6. 词库缺失时优雅降级（不抛错，返回 found:false）
+ *
+ * 运行：node test-background.js
+ */
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const DIR = __dirname;
+
+let pass = 0, fail = 0;
+const log = [];
+function check(name, cond, extra) {
+  if (cond) { pass++; log.push("  ✓ " + name); }
+  else { fail++; log.push("  ✗ " + name + (extra ? "  → " + extra : "")); }
+}
+
+console.log("=".repeat(58));
+console.log("后台 Service Worker 查词测试");
+console.log("=".repeat(58));
+
+/**
+ * 构造一个尽量贴近真实 MV3 worker 的运行环境并执行 background.js。
+ *
+ * @param {object} opts
+ * @param {boolean} opts.withDict 是否真的提供词库文件（false 用于测降级）
+ */
+function createWorker(opts) {
+  const o = opts || {};
+  const runtime = {};
+  let messageHandler = null;   // 记录 onMessage 注册的监听器
+  let installedHandler = null;
+  let ctx = null;              // vm 上下文，供 importScripts 注入脚本
+
+  const sandbox = {
+    console,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    Promise, Map, Set, Object, Array, String, Number, Error, JSON,
+  };
+
+  // ---- importScripts：真实执行词库与查词模块，注入到同一 sandbox 全局 ----
+  const importCalls = [];
+  sandbox.importScripts = function () {
+    const names = Array.prototype.slice.call(arguments);
+    names.forEach(n => {
+      importCalls.push(n);
+      if (!o.withDict && (n === "dict.js" || n === "dict-extra.js")) {
+        return; // 模拟词库文件缺失
+      }
+      const p = path.join(DIR, n);
+      if (!fs.existsSync(p)) throw new Error("importScripts 目标不存在: " + n);
+      const src = fs.readFileSync(p, "utf8");
+      // 在同一个上下文中执行：顶层 var 会成为该上下文的全局属性，
+      // 与真实 worker 里 importScripts 的语义一致。
+      vm.runInContext(src, ctx, { filename: n });
+    });
+  };
+
+  // ---- chrome API 桩 ----
+  sandbox.chrome = {
+    runtime: {
+      lastError: null,
+      onMessage: {
+        addListener(fn) { messageHandler = fn; }
+      },
+      onInstalled: { addListener(fn) { installedHandler = fn; } },
+      onStartup: { addListener() {} },
+    },
+    contextMenus: {
+      removeAll(cb) { cb && cb(); },
+      create() {},
+      onClicked: { addListener() {} },
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: {
+      query(_q, cb) { cb && cb([]); },
+      sendMessage(_id, _msg, cb) { cb && cb(); },
+    },
+    storage: {
+      sync: {
+        get(defaults, cb) { cb && cb(defaults); },
+        set(_p, cb) { cb && cb(); },
+      },
+    },
+  };
+
+  // fetch 桩：让在线通道可用（但本测试基本只走离线路径）
+  sandbox.fetch = function () {
+    return Promise.reject(new Error("offline test"));
+  };
+  sandbox.AbortController = function () {
+    this.signal = {};
+    this.abort = function () {};
+  };
+
+  // 创建上下文（必须先建好，importScripts 执行时需要向其中注入脚本）
+  ctx = vm.createContext(sandbox);
+
+  // background.js 里写的是 importScripts(...)，Node 环境没有这个全局函数。
+  // 这里把它整体改名为 sandboxImportScripts（同一个函数对象），
+  // 这样 background.js 源码不用改，也能在我们的桩上运行。
+  sandbox.sandboxImportScripts = sandbox.importScripts;
+  const bgSrc = fs
+    .readFileSync(path.join(DIR, "background.js"), "utf8")
+    .replace(/^importScripts\(/m, "sandboxImportScripts(");
+  vm.runInContext(bgSrc, ctx, { filename: "background.js" });
+
+  return {
+    sandbox,
+    importCalls,
+    hasMessageHandler: () => typeof messageHandler === "function",
+    hasInstalledHandler: () => typeof installedHandler === "function",
+    /** 像内容脚本那样发消息并拿响应（同步响应场景） */
+    send(msg) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("消息超时未响应: " + msg.type)), 2000);
+        let done = false;
+        const ret = messageHandler(msg, { id: "test" }, resp => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(resp);
+        });
+        // 监听器返回 true 表示异步响应；本测试的 HT_LOOKUP / HT_DICT_INFO 应返回假值
+        if (ret !== true) {
+          // 已同步响应，若上面回调还没触发说明监听器没调 sendResponse
+          if (!done) {
+            clearTimeout(timer);
+            reject(new Error("监听器未调用 sendResponse（返回 " + JSON.stringify(ret) + "）"));
+          }
+        }
+      });
+    },
+  };
+}
+
+// ---------- 载入真实词库条目数，用于交叉校验 ----------
+function countDict(file, varName) {
+  const src = fs.readFileSync(path.join(DIR, file), "utf8");
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(src, sandbox, { filename: file });
+  return Object.keys(sandbox[varName] || {}).length;
+}
+const realCore = countDict("dict.js", "LOCAL_DICT");
+const realExtra = countDict("dict-extra.js", "DICT_EXTRA");
+console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " + realExtra + " 条\n");
+
+// ---------- 主流程 ----------
+(async function run() {
+  const w = createWorker({ withDict: true });
+
+  // ---- 装配校验 ----
+  check("importScripts 调用了 3 个文件", w.importCalls.length === 3, JSON.stringify(w.importCalls));
+  check("importScripts 顺序正确（dict -> dict-extra -> dict-lookup）",
+    w.importCalls.join(",") === "dict.js,dict-extra.js,dict-lookup.js",
+    JSON.stringify(w.importCalls));
+  check("worker 全局可见 LOCAL_DICT",
+    w.sandbox.LOCAL_DICT && Object.keys(w.sandbox.LOCAL_DICT).length === realCore,
+    "实际 " + (w.sandbox.LOCAL_DICT ? Object.keys(w.sandbox.LOCAL_DICT).length : "undefined"));
+  check("worker 全局可见 DICT_EXTRA",
+    w.sandbox.DICT_EXTRA && Object.keys(w.sandbox.DICT_EXTRA).length === realExtra,
+    "实际 " + (w.sandbox.DICT_EXTRA ? Object.keys(w.sandbox.DICT_EXTRA).length : "undefined"));
+  check("worker 全局可见 lookupLocal 函数", typeof w.sandbox.lookupLocal === "function");
+  check("worker 全局可见 buildLocalResult 函数", typeof w.sandbox.buildLocalResult === "function");
+  check("已注册 onMessage 监听器", w.hasMessageHandler());
+  check("已注册 onInstalled 监听器", w.hasInstalledHandler());
+
+  // ---- HT_DICT_INFO ----
+  const info = await w.send({ type: "HT_DICT_INFO" });
+  check("HT_DICT_INFO 返回成功", info && info.ok === true, JSON.stringify(info));
+  check("HT_DICT_INFO 词条数与文件一致",
+    info && info.core === realCore && info.extra === realExtra,
+    info ? `core ${info.core}/${realCore}，extra ${info.extra}/${realExtra}` : "无响应");
+  check("HT_DICT_INFO 返回合计与版本",
+    info && info.total === realCore + realExtra && typeof info.version === "string",
+    info ? "total " + info.total + "，version " + info.version : "无响应");
+
+  // ---- HT_LOOKUP：精选词库 ----
+  const core = await w.send({ type: "HT_LOOKUP", word: "efficiency" });
+  check("查 efficiency 命中精选词库", core && core.ok && core.found, JSON.stringify(core));
+  check("efficiency 结果结构完整（可直接渲染）",
+    core && core.result && core.result.tier === "core" &&
+    core.result.source === "local" && Array.isArray(core.result.groups) &&
+    core.result.groups.length > 0,
+    core && core.result ? JSON.stringify(core.result).slice(0, 120) : "无");
+  check("efficiency 释义含「效率」",
+    core && core.result && /效率/.test(core.result.plain || ""),
+    core && core.result ? core.result.plain : "无");
+  check("efficiency 带词性 n.",
+    core && core.result && core.result.groups.some(g => g.pos === "n."),
+    core && core.result ? JSON.stringify(core.result.groups) : "无");
+
+  // ---- HT_LOOKUP：扩展词库（含音标）----
+  const extra = await w.send({ type: "HT_LOOKUP", word: "procurement" });
+  check("查 procurement 命中扩展词库", extra && extra.found, JSON.stringify(extra));
+  check("procurement 标记 tier=extra", extra && extra.result && extra.result.tier === "extra");
+  check("procurement 带音标（扩展库 k 字段）",
+    extra && extra.result && !!extra.result.phonetic && extra.result.phonetic.length > 0,
+    extra && extra.result ? JSON.stringify(extra.result.phonetic) : "无");
+
+  // ---- HT_LOOKUP：词形还原 ----
+  const infl = await w.send({ type: "HT_LOOKUP", word: "depreciating" });
+  check("查 depreciating 经词形还原命中", infl && infl.found, JSON.stringify(infl));
+  check("depreciating 返回 inflected=true 且原形为 depreciate",
+    infl && infl.result && infl.result.inflected === true && infl.result.matched === "depreciate",
+    infl && infl.result ? "matched=" + infl.result.matched + " inflected=" + infl.result.inflected : "无");
+
+  const plural = await w.send({ type: "HT_LOOKUP", word: "Implementations" });
+  check("查 Implementations（大写复数）还原到 implementation",
+    plural && plural.found && plural.result.matched === "implementation",
+    plural && plural.result ? "matched=" + plural.result.matched : "无");
+
+  // ---- 精选优先于扩展（同键时不该被扩展覆盖）----
+  const coreTier = await w.send({ type: "HT_LOOKUP", word: "efficiency" });
+  check("精选词条不会被扩展库覆盖（tier 仍为 core）",
+    coreTier && coreTier.result && coreTier.result.tier === "core");
+
+  // ---- 未收录词 ----
+  const miss = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq" });
+  check("未收录词返回 ok:true + found:false（交由在线兜底）",
+    miss && miss.ok === true && miss.found === false, JSON.stringify(miss));
+
+  // ---- 边界输入 ----
+  const empty = await w.send({ type: "HT_LOOKUP", word: "" });
+  check("空词返回未命中且不崩溃", empty && empty.found === false, JSON.stringify(empty));
+  const undef = await w.send({ type: "HT_LOOKUP" });
+  check("缺 word 字段返回未命中且不崩溃", undef && undef.found === false, JSON.stringify(undef));
+
+  // ---- 原型链防护（在 worker 侧同样成立）----
+  const proto = await w.send({ type: "HT_LOOKUP", word: "__proto__" });
+  check("__proto__ 不误命中原型链", proto && proto.found === false, JSON.stringify(proto));
+  const ctor = await w.send({ type: "HT_LOOKUP", word: "constructor" });
+  check("constructor 命中词条对象而非 JS 内置构造器",
+    !ctor || !ctor.found || (ctor.result && typeof ctor.result.plain === "string"),
+    JSON.stringify(ctor && ctor.result ? ctor.result.plain : ctor));
+
+  // ---- 未知消息类型不应抛错 ----
+  let unknownOk = true;
+  try {
+    // 监听器对未知类型直接 return，不会调 sendResponse
+    w.sandbox.chrome.runtime; // noop
+  } catch (_) { unknownOk = false; }
+  check("未知消息类型不会导致模块加载失败", unknownOk);
+
+  // ---------- 降级场景：词库缺失 ----------
+  console.log("\n[降级] 词库文件缺失时的行为");
+  const w2 = createWorker({ withDict: false });
+  const info2 = await w2.send({ type: "HT_DICT_INFO" });
+  check("词库缺失时 HT_DICT_INFO 返回 ok:false", info2 && info2.ok === false, JSON.stringify(info2));
+  const look2 = await w2.send({ type: "HT_LOOKUP", word: "efficiency" });
+  check("词库缺失时 HT_LOOKUP 返回 found:false 而不抛错",
+    look2 && look2.found === false, JSON.stringify(look2));
+  check("词库缺失时标记 reason=dict-unavailable",
+    look2 && look2.reason === "dict-unavailable", JSON.stringify(look2));
+
+  console.log(log.join("\n"));
+  console.log("\n通过 " + pass + " / " + (pass + fail));
+  console.log(fail === 0 ? "\n全部通过 ✓" : "\n存在失败项 ✗");
+  process.exit(fail === 0 ? 0 : 1);
+})().catch(e => {
+  console.error("测试执行异常：", e && e.stack ? e.stack : e);
+  process.exit(1);
+});

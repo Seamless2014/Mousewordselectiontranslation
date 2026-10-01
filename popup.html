@@ -204,8 +204,9 @@
     右键菜单也可切换 · 按 <kbd>Esc</kbd> 关闭当前气泡
   </div>
 
-  <script src="dict.js"></script>
-  <script src="dict-extra.js"></script>
+  <!-- 注意：popup 不再引入 dict.js / dict-extra.js。
+       v1.2.0 起词库由 service worker 统一持有（避免每个上下文各存一份 2.1 MB），
+       词条数通过 HT_DICT_INFO 消息向后台查询。 -->
   <script src="popup.js"></script>
 </body>
 </html>

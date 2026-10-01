@@ -12,7 +12,8 @@
 |---|---|
 | 悬停即译 | 鼠标停在单词上约 320ms 自动弹出中文释义，**同一段落内换词也能持续翻译** |
 | 移开即隐 | 鼠标离开气泡自动消失，不打断阅读 |
-| 本地词库优先 | **内置约 3 万词**（精选 940 条 + ECDICT 高频扩展），**离线可用、零延迟** |
+| 本地词库优先 | **内置约 3 万词**（精选 940 条 + ECDICT 高频扩展），**离线可用** |
+| 内存恒定 | 词库由后台统一持有，**开多少标签页都只占一份内存**（约 8.8 MB，不随标签页增长） |
 | 在线兜底 | 本地未收录的词自动联网翻译（Google 主通道 + MyMemory 备用通道） |
 | 词形还原 | `implementations` → `implementation`、`running` → `run`、`analyses` → `analysis` |
 | 音标显示 | 扩展词库自带音标，本地查询即可显示，无需联网 |
@@ -75,10 +76,15 @@
 - 没有悬浮球：说明内容脚本未注入（回到第 1、2 条），或设置里关了「显示悬浮球」。
 
 **4. 确认脚本已加载（最快的自检）**
-按 `F12` 打开控制台，应看到一行蓝字：
-`[悬停取词翻译] v1.1.0 已加载，悬停英文单词即可翻译`
-- 看不到 → 脚本未注入（回到第 1、2 条），或扩展没刷新（见第 5 条）。
-- 看得到但仍不翻译 → 悬停停顿时间要超过设置里的"触发延迟"（默认 320ms），
+按 `F12` 打开控制台，应看到两行蓝字：
+```
+[悬停取词翻译] v1.2.0 已加载，悬停英文单词即可翻译
+[悬停取词翻译] 离线词库已就绪：精选 940 条 + 扩展 30000 条 = 30940 条（由后台统一持有）
+```
+- 只有第一行、没有第二行 → **后台词库没起来**，去 `chrome://extensions` 点该扩展的
+  「Service Worker」链接看报错；最常见原因是 `background.js` 的 `importScripts` 目标缺失。
+- 两行都没有 → 脚本未注入（回到第 1、2 条），或扩展没刷新（见第 5 条）。
+- 两行都有但仍不翻译 → 悬停停顿时间要超过设置里的"触发延迟"（默认 320ms），
   快速扫过单词不会触发；另外检查悬浮球是否为关闭态。
 
 **5. 重新加载扩展**
@@ -88,6 +94,7 @@
 
 **6. 查看报错信息**
 - 在扩展页面点 **「错误」** 按钮 或 **「Service Worker」** 链接，看后台有无异常。
+  v1.2.0 起词库由后台加载，**若词库相关报错，一定在这里**——网页控制台看不到。
 - 在任意网页按 `F12` → Console，看有无 `ht-` 相关报错。
 
 **7. 权限被拦截**
@@ -106,7 +113,8 @@
 本地词库约 3 万词，覆盖日常、学术、技术、商务高频词（含开发者文档常见词与月份星期）。
 极生僻词、最新术语依赖在线兜底；若在线不可用则查不到。可按下方「词库说明」自行扩充。
 在扩展设置面板底部可看到当前**实际加载的本地词条数**——若显示「未加载」或数字异常偏小，
-说明词库文件没被正确注入，请在 `chrome://extensions` **重新加载扩展**并刷新页面。
+说明**后台词库没加载成功**，请在 `chrome://extensions` 查看该扩展的
+「Service Worker」是否有 `importScripts` 报错，然后**重新加载扩展**并刷新页面。
 
 ---
 
@@ -115,49 +123,116 @@
 ```
 hover-translate/
 ├── manifest.json      # 扩展清单（MV3）
-├── content.js         # 内容脚本：取词、词形还原、气泡渲染、开关
+├── content.js         # 内容脚本（轻壳）：取词、向后台查词、气泡渲染、开关
 ├── content.css        # 气泡与悬浮球样式
 ├── dict.js            # 精选词库（940 条，手工维护）
-├── dict-extra.js      # 扩展词库（约 2.9 万条，由 ECDICT 自动生成，勿手工编辑）
+├── dict-extra.js      # 扩展词库（3 万条，由 ECDICT 自动生成，勿手工编辑）
+├── dict-lookup.js     # 词形还原 + 两级查词（唯一实现，由后台 importScripts 加载）
 ├── build-dict.js      # 词库构建脚本：从 ECDICT CSV 生成 dict-extra.js
-├── background.js      # Service Worker：在线翻译代理、右键菜单、快捷键
-├── popup.html/js      # 设置面板
+├── background.js      # Service Worker：持有词库、离线查词、在线翻译代理、菜单/快捷键
+├── popup.html/js      # 设置面板（词条数向后台查询，不再自己加载词库）
 ├── icons/             # 扩展图标
+├── run-tests.js       # 测试总入口（自动定位 jsdom，一键跑全部套件）
 ├── test-verify.js     # 精选词库与词形还原验证（开发自测）
 ├── test-extra.js      # 扩展词库与两级查词验证（开发自测）
+├── test-background.js # 后台查词与 importScripts 装配验证（开发自测）
+├── test-edge.js       # 边界场景与消息契约校验（开发自测）
 ├── test-e2e.js        # DOM 端到端模拟测试（开发自测）
 ├── test-switch.js     # 开关链路诊断（开发自测）
 ├── test-manifest.js   # 清单一致性检查（开发自测）
-└── test-perf.js       # 在线翻译性能与降级测试（开发自测）
+├── test-perf.js       # 在线翻译性能 + 离线查词耗时测试（开发自测）
+├── verify-browser.js  # 真实 Chromium 验收：功能端到端 + CDP 内存实测（开发工具）
+└── bench-memory.js    # 内存占用对比实测（开发工具）
 ```
 
 ---
 
 ## 自测
 
+**推荐：一条命令跑全部**（自动定位 jsdom，无需手动设 `NODE_PATH`）
+
 ```bash
-# 精选词库完整性 + 词形还原（无需依赖）
-node test-verify.js
-
-# 扩展词库结构 + 两级查词优先级（无需依赖）
-node test-extra.js
-
-# Manifest 一致性：注入清单 vs 代码依赖（无需依赖）
-node test-manifest.js
-
-# 在线翻译性能：竞速 / 超时 / 缓存（无需依赖）
-node test-perf.js
-
-# 端到端 DOM 模拟（需 jsdom）
-NODE_PATH=<node_modules 路径> node test-e2e.js
-
-# 开关链路诊断（需 jsdom）
-NODE_PATH=<node_modules 路径> node test-switch.js
+node run-tests.js              # 全部套件（210 个用例）
+node run-tests.js e2e switch   # 只跑名字含 e2e / switch 的套件
 ```
+
+退出码 0 表示全绿，可直接用于 CI。也可单独运行某个套件：
+
+```bash
+node test-verify.js      # 精选词库 + 词形还原（无需依赖）
+node test-extra.js       # 扩展词库结构 + 两级查词优先级（无需依赖）
+node test-background.js  # 后台查词 + importScripts 装配（无需依赖）
+node test-edge.js        # 边界场景 + 消息契约（无需依赖）
+node test-manifest.js    # 清单一致性：词库不得注入内容脚本（无需依赖）
+node test-perf.js        # 在线竞速/超时/缓存 + 离线查词耗时（无需依赖）
+node test-e2e.js         # 端到端 DOM 模拟（需 jsdom）
+node test-switch.js      # 开关链路 + 查词链路（需 jsdom）
+```
+
+内存收益实测：
+
+```bash
+node --expose-gc bench-memory.js 20 5   # 20 标签页 × 5 iframe
+```
+
+### 真实浏览器验收（可选，需本机 Chromium）
+
+`run-tests.js` 的八个套件跑在 Node/jsdom 模拟环境里；`verify-browser.js` 则启动
+**真实 Chromium**（`--load-extension` 加载本目录），验证三件模拟环境测不到的事：
+
+1. Service Worker 里 `importScripts` 真实装配 + 真实查词（35 项断言）
+2. 真实页面悬停取词：气泡渲染、中文释义、「本地词库 / 本地词库 · 扩展」角标、词形还原、Esc/移开隐藏
+3. **CDP 内存实测**：1 → 16 个标签页，SW 堆是否恒定、网页堆是否不含词库副本
+
+```bash
+# 需要 NODE_PATH 指到 playwright-core 所在目录；窗口会开到屏幕外，不干扰操作
+NODE_PATH=".../node_modules" node verify-browser.js        # 默认 13 个额外标签页
+NODE_PATH=".../node_modules" node verify-browser.js 20     # 指定标签页数
+NODE_PATH=".../node_modules" node verify-browser.js --no-memory   # 只验功能
+```
+
+v1.2.0 实测参考值（Chromium 151）：
+
+| 指标 | 1 个标签页 | 16 个标签页 |
+|---|---|---|
+| Service Worker 堆 | 9.5 MB | **9.5 MB（+0.0%）** |
+| 单个网页 JS 堆 | 1.8 MB | 1.4 MB（不含词库副本） |
+
+注意：`content_scripts` 的 `<all_urls>` **不包含 `data:` URL**，验收脚本内置了一个
+本地 HTTP 服务把测试页落在 `http://127.0.0.1` 上，属正常设计而非绕过。
 
 ---
 
 ## 实现要点
+
+**词库归后台（v1.2.0，重要架构调整）**
+
+v1.1 及之前，`dict.js` / `dict-extra.js` 由 `manifest.content_scripts` 注入。但**内容脚本是「每个 frame 一份独立 JS 环境」**（`all_frames: true` 下标签页的每个 iframe 也算一份），于是：
+
+- 每份都要**独立解析** 2.1 MB 的 `dict-extra.js`
+- 每份都在 V8 堆里**独立持有**词库对象，实测堆增量 **8.8 MB/份**（源文本的 4.1 倍）
+
+推算 20 个标签页 × 平均 5 个 iframe = 100 份 ≈ **879 MB**，且同一份脚本被重复解析 100 次。
+
+v1.2.0 把词库移到 Service Worker（`background.js` 用 `importScripts("dict.js", "dict-extra.js", "dict-lookup.js")` 加载），**全局只持有一份**：
+
+| 项目 | v1.1（注入内容脚本） | v1.2（后台集中持有） |
+|---|---|---|
+| 内存占用（100 frame） | ≈ 879 MB | **8.8 MB 恒定** |
+| 随标签页增长 | 线性增长 | **恒定不变** |
+| 词库解析次数 | 100 次 | **1 次** |
+| 每次查词 | 纯内存查找 | 多一次消息往返（约 1–3 ms） |
+
+代价是内容脚本查词要走一次 `chrome.runtime.sendMessage`。实测 worker 侧查词平均 **0.003 ms**，加上序列化与 IPC 约 1–3 ms，相对 `hoverDelay` 默认 320 ms 占比不到 1%，用户无感；且内容脚本侧仍有命中缓存，同一单词重复悬停不再往返。
+
+配套设计：
+
+- **惰性初始化**：Service Worker 空闲约 30 s 会被回收，用 `importScripts` 的重新执行 + 首次查词触发重建即可，**不需要 `chrome.alarms` 常驻唤醒**（那是白白耗电）。
+- **超时降级**：内容脚本查后台设 200 ms 上限（`LOCAL_LOOKUP_TIMEOUT`），超时直接走在线兜底，不卡住取词。
+- **查词逻辑单一实现**：词形还原、两级优先级、词条组装全部收在 `dict-lookup.js`；以前 `content.js` / `test-extra.js` / `test-verify.js` 各存一份副本，改一处要同步三处。
+- **popup 不再加载词库**：词条数改为发 `HT_DICT_INFO` 询问后台，避免「开一次 popup 多一份 2.1 MB 堆占用」。
+
+**为什么不用 SharedArrayBuffer**：跨进程共享内存需要页面自身返回 `COOP`/`COEP` 响应头，扩展无权为站点设置，因此不可行。
 
 **取词**：用 `document.caretRangeFromPoint(x, y)` 拿到鼠标坐标处的文本节点与偏移，再向两侧扩展到完整单词。比 `mouseover` 事件目标更精确——同一段落内不同单词都能准确区分。
 
@@ -167,10 +242,10 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 改为 `mousemove` 驱动后，段落内每个词停顿即可翻译；悬停在图片/空白上气泡自动收起。
 
 **词形还原**：先查不规则词表（`was→be`、`built→build`、`analyses→analysis`），再按后缀规则生成候选原形（复数、`-ing`、`-ed`、比较级、副词 `-ly`），逐个查词库。因此 `implementations`、`significantly`、`libraries` 都能命中。
-注意：ECDICT 中大量变体形式（`negotiated`、`audited`、`works`）**本身就有独立词条**，
+注意：ECDICT 中大量变体形式（`negotiated`、`audited`、`running`）**本身就有独立词条**，
 会走"原词直命中"而非还原——这是有意的，因为 ECDICT 对变体的释义更精确（会标注"（…的过去式）"）。
 
-**两级词库查词（v1.1.0）**：`lookupLocal` 先查精选词库 `LOCAL_DICT`、再查扩展词库 `DICT_EXTRA`，
+**两级词库查词**：`lookupLocal` 先查精选词库 `LOCAL_DICT`、再查扩展词库 `DICT_EXTRA`，
 原词优先于还原候选（即"词库直命中" > "词形还原命中"）。查词用 `hasOwnProperty` 判断，
 避免键名撞上 `Object.prototype` 的属性；`constructor` 这类词虽是 ECDICT 里的真实单词，
 也只会取到词典释义，不会拿到 JS 内置构造器。
@@ -201,7 +276,8 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 - Service Worker 在空闲约 30 秒后会被浏览器终止。若开关状态要「内容脚本 → 后台 → storage → 回传内容脚本」绕一圈，
   后台休眠时这条链会断，表现为**点了开关没反应、或刷新后状态回滚**。
 - 改直连 storage 后，写入立即落盘，各页面通过 `storage.onChanged` 自动同步，不存在竞态。
-- 后台仅承担在线翻译代理与右键菜单/快捷键的事件转发。
+- 后台承担三件事：**离线查词**、在线翻译代理、右键菜单/快捷键的事件转发。
+  （查词走 `HT_LOOKUP`，词条数查询走 `HT_DICT_INFO`；开关状态**不**走后台。）
 
 **气泡跟随**：`position: fixed` + 鼠标 `clientX/clientY`，每帧更新位置，并做视口边界约束避免溢出。
 
@@ -224,11 +300,16 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 | 层级 | 文件 | 词条数 | 特点 |
 |---|---|---|---|
 | 精选词库 | `dict.js` | 940 | 手工维护，释义精炼、词性准确，气泡标注 **「本地词库」** |
-| 扩展词库 | `dict-extra.js` | 约 2.9 万 | ECDICT 按 BNC/COCA 词频筛出，带音标，气泡标注 **「本地词库 · 扩展」** |
+| 扩展词库 | `dict-extra.js` | 30,000 | ECDICT 按 BNC/COCA 词频筛出，带音标，气泡标注 **「本地词库 · 扩展」** |
 
 两级用**不同变量名**（`LOCAL_DICT` / `DICT_EXTRA`）声明，同键时精选词库优先，
 不会被机器生成的释义覆盖。查询走 `hasOwnProperty`，不会误命中原型链上的
 `constructor`、`toString` 等属性。
+
+**两个文件都由 Service Worker 通过 `importScripts` 加载**（顺序：`dict.js` → `dict-extra.js`
+→ `dict-lookup.js`，最后一个是查词实现，依赖前两者）。内容脚本不加载词库。
+调整词库后需在 `chrome://extensions` **重新加载扩展**（后台会重新 importScripts），
+而**不必**刷新所有页面——这正是集中持有带来的额外好处。
 
 ### 重新生成扩展词库
 

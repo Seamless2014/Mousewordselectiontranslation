@@ -14,3 +14,6 @@ Thumbs.db
 # 临时与诊断文件
 _*.js
 *.log
+
+# 验收脚本的生成物（每次运行结果不同，仅本地查看见 verify-browser.js）
+verify-browser-result.json

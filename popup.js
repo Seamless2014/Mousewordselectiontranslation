@@ -81,18 +81,26 @@
     render();
   });
 
-  // 显示本地词库条目数（精选词库 + ECDICT 扩展词库合计）
-  try {
-    const core = typeof LOCAL_DICT === "object" && LOCAL_DICT ? Object.keys(LOCAL_DICT).length : 0;
-    const extra = typeof DICT_EXTRA === "object" && DICT_EXTRA ? Object.keys(DICT_EXTRA).length : 0;
-    const total = core + extra;
-    if (!total) {
+  // 显示本地词库条目数（精选词库 + ECDICT 扩展词库合计）。
+  //
+  // v1.2.0 起 popup 不再自己加载 2.1 MB 词库（那样开一次 popup 就多一份堆占用），
+  // 改为向 service worker 查询。后台未就绪时降级显示"—"，不影响其他设置项。
+  function renderDictCount() {
+    try {
+      chrome.runtime.sendMessage({ type: "HT_DICT_INFO" }, resp => {
+        if (chrome.runtime.lastError || !resp || !resp.ok || !resp.total) {
+          els.dictCount.textContent = "未加载";
+          els.dictCount.title = "后台词库尚未就绪，扩展重载后重试";
+          return;
+        }
+        els.dictCount.textContent = resp.total.toLocaleString() + " 条";
+        els.dictCount.title =
+          "精选词库 " + resp.core + " 条 + 扩展词库 " + resp.extra + " 条" +
+          "（由后台统一持有，内存不随标签页增长）";
+      });
+    } catch (_) {
       els.dictCount.textContent = "未加载";
-    } else {
-      els.dictCount.textContent = total.toLocaleString() + " 条";
-      els.dictCount.title = "精选词库 " + core + " 条 + 扩展词库 " + extra + " 条";
     }
-  } catch (_) {
-    els.dictCount.textContent = "未加载";
   }
+  renderDictCount();
 })();

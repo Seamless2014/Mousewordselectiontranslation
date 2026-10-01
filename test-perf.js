@@ -56,14 +56,54 @@ global.chrome = {
   storage: { sync: { get(d, cb) { cb(d); }, set() {} } }
 };
 
-// 载入 background.js（提取 translate 相关函数）
+// 载入 background.js（提取 translate / lookupOffline 相关函数）
+//
+// v1.2.0：background.js 顶层有 importScripts("dict.js", ...)，Node 里没有这个
+// 全局函数。这里提供真实实现——按顺序在同一个 vm 上下文执行词库与查词模块，
+// 顺便让本测试也能覆盖离线查词的耗时（方案 B 的消息往返代价由此量化）。
+const vm = require("vm");
 let bgSrc = fs.readFileSync(path.join(DIR, "background.js"), "utf8");
-// 去掉对 chrome 事件注册的副作用调用（监听器注册是幂等的，但避免干扰）
-const sandbox = { module: { exports: {} } };
-const loader = new Function("chrome", "fetch", "AbortController",
-  bgSrc + "\n; return { translate, raceChannels, cacheGet, cacheSet, CHANNEL_TIMEOUT, TOTAL_TIMEOUT };");
 
-const api = loader(global.chrome, global.fetch, global.AbortController);
+const workerSandbox = {
+  console, setTimeout, clearTimeout, Promise, Map, Set, Object, Array, String, Number, Error, JSON,
+  // background.js 顶层会注册 chrome 事件与引用 fetch，这里把上面准备好的桩放进上下文
+  chrome: global.chrome,
+  fetch: global.fetch,
+  AbortController: global.AbortController,
+};
+vm.createContext(workerSandbox);
+workerSandbox.importScripts = function () {
+  Array.prototype.slice.call(arguments).forEach(n => {
+    const p = path.join(DIR, n);
+    if (!fs.existsSync(p)) throw new Error("importScripts 目标不存在: " + n);
+    vm.runInContext(fs.readFileSync(p, "utf8"), workerSandbox, { filename: n });
+  });
+};
+
+vm.runInContext(bgSrc, workerSandbox, { filename: "background.js" });
+// 暴露内部函数供断言。
+//
+// 注意：vm 上下文里 `const` 声明**不会**挂到全局对象（只有 var / function 会），
+// 所以 CHANNEL_TIMEOUT / TOTAL_TIMEOUT 这两个 const 需要用表达式在上下文内求值。
+const api = {
+  translate: workerSandbox.translate,
+  raceChannels: workerSandbox.raceChannels,
+  cacheGet: workerSandbox.cacheGet,
+  cacheSet: workerSandbox.cacheSet,
+  lookupOffline: workerSandbox.lookupOffline,
+  CHANNEL_TIMEOUT: vm.runInContext("CHANNEL_TIMEOUT", workerSandbox),
+  TOTAL_TIMEOUT: vm.runInContext("TOTAL_TIMEOUT", workerSandbox),
+};
+
+check0("background.js 可在模拟 worker 环境中加载", typeof api.translate === "function");
+check0("离线查词函数已导出", typeof api.lookupOffline === "function");
+
+function check0(name, cond) {
+  if (!cond) {
+    console.error("装配失败：" + name);
+    process.exit(1);
+  }
+}
 
 // ---------- 测试工具 ----------
 let pass = 0, fail = 0;
@@ -143,6 +183,59 @@ function mmPlan(delay, ok = true) {
   // ---- 6. 失败结果不写入缓存 ----
   const before = api.cacheGet("allfail");
   check("场景6 失败结果不污染缓存", before === null);
+
+  // ---- 7. 离线查词性能（v1.2.0：词库移到后台后的核心指标）----
+  //
+  // 方案 B 的代价是"每次查词多一次消息往返"。这个往返在真实浏览器里包含
+  // 序列化 + IPC，本测试只能量到 worker 侧的纯查词耗时（下界），
+  // 用来确认它远小于 hoverDelay（默认 320ms）。
+  console.log("\n[离线查词] 词库集中在后台后的单次查词耗时（worker 侧下界）");
+
+  const benchWords = ["efficiency", "approach", "implementation", "significantly", "procurement"];
+  // 预热：让 V8 完成优化
+  for (let i = 0; i < 200; i++) api.lookupOffline(benchWords[i % benchWords.length]);
+
+  let minMs = Infinity, maxMs = 0, sumMs = 0;
+  const N = 2000;
+  for (let i = 0; i < N; i++) {
+    const w = benchWords[i % benchWords.length];
+    const t = process.hrtime.bigint();
+    api.lookupOffline(w);
+    const d = Number(process.hrtime.bigint() - t) / 1e6;
+    if (d < minMs) minMs = d;
+    if (d > maxMs) maxMs = d;
+    sumMs += d;
+  }
+  const avgMs = sumMs / N;
+  console.log("  命中词查词：" + N + " 次  平均 " + avgMs.toFixed(4) + "ms  最小 " +
+    minMs.toFixed(4) + "ms  最大 " + maxMs.toFixed(3) + "ms");
+  check("单次离线查词平均 < 0.5ms（实测 " + avgMs.toFixed(4) + "ms）", avgMs < 0.5);
+  check("单次离线查词最坏 < 5ms（实测 " + maxMs.toFixed(3) + "ms）", maxMs < 5);
+
+  // 未命中词（要跑完词形还原的所有候选，是离线查词的最坏路径）
+  let missSum = 0, missMax = 0;
+  const MISS_N = 1000;
+  for (let i = 0; i < MISS_N; i++) {
+    const t = process.hrtime.bigint();
+    api.lookupOffline("unfindablezzz" + i);
+    const d = Number(process.hrtime.bigint() - t) / 1e6;
+    missSum += d;
+    if (d > missMax) missMax = d;
+  }
+  const missAvg = missSum / MISS_N;
+  console.log("  未命中词查词：" + MISS_N + " 次  平均 " + missAvg.toFixed(4) +
+    "ms  最大 " + missMax.toFixed(3) + "ms");
+  check("未命中词（走完全部还原候选）平均 < 0.5ms（实测 " + missAvg.toFixed(4) + "ms）", missAvg < 0.5);
+
+  // ---- 8. 词库体量与内存代理指标 ----
+  // 后台词条数 = 1 份；改造前是 N×M 份。这里给出单份基数，便于换算。
+  const coreN = Object.keys(workerSandbox.LOCAL_DICT || {}).length;
+  const extraN = Object.keys(workerSandbox.DICT_EXTRA || {}).length;
+  console.log("\n[词库] 后台持有：精选 " + coreN + " 条 + 扩展 " + extraN + " 条 = " + (coreN + extraN) + " 条（全局 1 份）");
+  check("后台词库条目数与预期一致（940 + 30000）",
+    coreN === 940 && extraN === 30000, coreN + " + " + extraN);
+  check("离线查词走的是词库而非网络（无 fetch 调用）",
+    api.lookupOffline("efficiency") && api.lookupOffline("efficiency").found === true);
 
   console.log(log.join("\n"));
   console.log("\n通过 " + pass + " / " + (pass + fail));

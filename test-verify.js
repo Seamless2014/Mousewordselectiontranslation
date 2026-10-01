@@ -1,109 +1,64 @@
 /**
  * 本地验证脚本（仅用于开发自测，非扩展运行时依赖）。
  * 校验：词库完整性、词形还原正确性、气泡渲染数据结构。
+ *
+ * v1.2.0 起，词形还原与查词逻辑只保留一份实现（dict-lookup.js）。
+ * 本测试直接加载该文件，不再复刻副本 —— 之前这里有 60 行重复代码，
+ * 与 content.js / test-extra.js 的实现漂移风险很高。
+ *
  * 运行： node test-verify.js
  */
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
+const DIR = __dirname;
 
-// 载入词库到全局：把顶层 const 声明改写为全局赋值，使其可在本模块内直接访问
-const dictSrc = fs
-  .readFileSync(path.join(__dirname, "dict.js"), "utf8")
-  .replace(/^(?:const|var|let)\s+LOCAL_DICT\s*=/m, "globalThis.LOCAL_DICT =");
-(new Function(dictSrc)).call(globalThis);
-if (!globalThis.LOCAL_DICT) {
+// 在同一个上下文中按后台装配顺序加载：词库 -> 查词模块
+const sandbox = { console };
+vm.createContext(sandbox);
+["dict.js", "dict-extra.js", "dict-lookup.js"].forEach(f => {
+  const p = path.join(DIR, f);
+  if (!fs.existsSync(p)) {
+    if (f === "dict-extra.js") return; // 可选
+    console.error("缺少文件：" + f);
+    process.exit(1);
+  }
+  vm.runInContext(fs.readFileSync(p, "utf8"), sandbox, { filename: f });
+});
+
+if (!sandbox.LOCAL_DICT) {
   console.error("词库加载失败");
   process.exit(1);
 }
-const LOCAL_DICT = globalThis.LOCAL_DICT;
+const LOCAL_DICT = sandbox.LOCAL_DICT;
+const lookupLocal = sandbox.lookupLocal;
+const buildLocalResult = sandbox.buildLocalResult;
 
-// 从 content.js 中抽取还原逻辑进行验证（复制而非导入，避免 DOM 依赖）
-const IRREGULAR = {
-  was: "be", were: "be", been: "be", is: "be", are: "be", am: "be",
-  has: "have", had: "have", did: "do", does: "do", done: "do",
-  went: "go", gone: "go", made: "make", took: "take", taken: "take",
-  gave: "give", given: "give", found: "find", knew: "know", known: "know",
-  thought: "think", saw: "see", seen: "see", said: "say", told: "tell",
-  became: "become", left: "leave", kept: "keep", began: "begin", begun: "begin",
-  ran: "run", brought: "bring", wrote: "write", written: "write",
-  stood: "stand", lost: "lose", paid: "pay", met: "meet", led: "lead",
-  understood: "understand", spoke: "speak", spoken: "speak", read: "read",
-  spent: "spend", grew: "grow", grown: "grow", won: "win", built: "build",
-  fell: "fall", sold: "sell", broke: "break", broken: "break",
-  ate: "eat", eaten: "eat", caught: "catch", drew: "draw", drawn: "draw",
-  chose: "choose", chosen: "choose", children: "child", men: "man",
-  women: "woman", feet: "foot", teeth: "tooth", mice: "mouse",
-  lives: "life", better: "good", best: "good", worse: "bad", worst: "bad",
-  more: "much", most: "much", less: "little", least: "little",
-  analyses: "analysis", indices: "index"
-};
-
-function lemmatize(word) {
-  const w = word.toLowerCase();
-  if (IRREGULAR[w]) return IRREGULAR[w];
-  if (w.length <= 3) return w;
-  const cands = [];
-  if (w.endsWith("ies")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ves")) cands.push(w.slice(0, -3) + "f", w.slice(0, -3) + "fe");
-  if (w.endsWith("ses") || w.endsWith("xes") || w.endsWith("zes") ||
-      w.endsWith("ches") || w.endsWith("shes")) cands.push(w.slice(0, -2));
-  if (w.endsWith("es")) cands.push(w.slice(0, -1), w.slice(0, -2));
-  if (w.endsWith("s") && !w.endsWith("ss")) cands.push(w.slice(0, -1));
-  if (w.endsWith("ying")) cands.push(w.slice(0, -4) + "ie", w.slice(0, -4) + "y");
-  if (w.endsWith("ing")) {
-    cands.push(w.slice(0, -3), w.slice(0, -3) + "e");
-    const stem = w.slice(0, -3);
-    if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
-      cands.push(stem.slice(0, -1));
-    }
-  }
-  if (w.endsWith("ied")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ed")) {
-    cands.push(w.slice(0, -2), w.slice(0, -1));
-    const stem = w.slice(0, -2);
-    if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
-      cands.push(stem.slice(0, -1));
-    }
-  }
-  if (w.endsWith("ier")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("iest")) cands.push(w.slice(0, -4) + "y");
-  if (w.endsWith("er")) cands.push(w.slice(0, -2), w.slice(0, -1));
-  if (w.endsWith("est")) cands.push(w.slice(0, -3), w.slice(0, -2));
-  if (w.endsWith("ily")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ly")) cands.push(w.slice(0, -2), w.slice(0, -2) + "e");
-  return cands.length ? cands : w;
-}
-
-function lookupLocal(raw) {
-  const w = raw.toLowerCase();
-  if (LOCAL_DICT[w]) return { word: w, entry: LOCAL_DICT[w], matched: w };
-
-  const res = lemmatize(w);
-  // lemmatize 命中不规则词表时返回字符串（唯一原形），否则返回候选数组
-  const cands = typeof res === "string" ? [res] : (Array.isArray(res) ? res : []);
-
-  for (const c of cands) {
-    if (c && c !== w && LOCAL_DICT[c]) {
-      return { word: w, entry: LOCAL_DICT[c], matched: c, inflected: true };
-    }
-  }
-  return null;
+if (typeof lookupLocal !== "function" || typeof buildLocalResult !== "function") {
+  console.error("dict-lookup.js 未正确导出 lookupLocal / buildLocalResult");
+  process.exit(1);
 }
 
 // ---- 测试用例：输入 -> 期望命中的词条键 ----
+//
+// 注意（v1.1 起词库为两级）：
+//  ECDICT 扩展库里大量变体形式**本身就有独立词条**（running / generated /
+//  children / matched / provided …），查它们会"原词直命中"而不是词形还原。
+//  这是正确行为——ECDICT 对这些变体给的释义往往比词根更贴切（例如 running
+//  直接给"赛跑；流出；运转"）。因此本组用例只保留"变体不在库、必须靠还原"的词，
+//  用它来验证还原逻辑真的活着。
 const CASES = [
   ["analysis", "analysis"], ["analyses", "analysis"],
-  ["running", "run"], ["compiled", "compile"], ["deployed", "deploy"],
-  ["words", "word"], ["studies", "study"], ["implementations", "implementation"],
-  ["generated", "generate"], ["distributed", "distributed"],
-  ["configurations", "configuration"], ["children", "child"],
-  ["built", "build"], ["read", "read"], ["methods", "method"],
-  ["variables", "variable"], ["optimize", "optimize"], ["robust", "robust"],
-  ["interface", "interface"], ["requirements", "requirement"],
-  ["hypothesis", "hypothesis"], ["data", "data"],
-  ["efficiency", "efficiency"], ["significantly", "significantly"],
-  ["discussed", "discuss"], ["libraries", "library"], ["matched", "match"],
-  ["creating", "create"], ["provided", "provide"], ["effective", "effective"],
+  ["implementations", "implementation"], ["configurations", "configuration"],
+  ["studies", "study"], ["libraries", "library"],
+  ["requirements", "requirement"], ["variables", "variable"],
+  ["methods", "method"], ["words", "word"],
+  ["compiled", "compile"], ["deployed", "deploy"],
+  ["optimize", "optimize"], ["robust", "robust"],
+  ["interface", "interface"], ["hypothesis", "hypothesis"],
+  ["data", "data"], ["efficiency", "efficiency"],
+  ["significantly", "significantly"], ["discussed", "discuss"],
+  ["creating", "create"], ["effective", "effective"],
   ["sequential", "sequential"], ["maintains", "maintain"]
 ];
 
@@ -119,7 +74,8 @@ for (const [input, expect] of CASES) {
 console.log("=".repeat(56));
 console.log("本地词库与词形还原验证");
 console.log("=".repeat(56));
-console.log("词库条目数：" + Object.keys(LOCAL_DICT).length);
+console.log("词库条目数：" + Object.keys(LOCAL_DICT).length +
+  "（查词实现来自 dict-lookup.js）");
 console.log("测试用例：" + CASES.length + "  通过 " + pass + "  失败 " + fail);
 if (fails.length) {
   console.log("\n失败明细：");
@@ -140,10 +96,59 @@ console.log("\n抽样命中效果：");
     }
   });
 
-// 未收录词检查（应走在线）
-const unknown = ["quantum", "heuristic", "serendipity", "blockchain"];
-console.log("\n未收录词（预期走在线兜底）：");
-unknown.forEach(w => console.log("  " + w.padEnd(14) + (lookupLocal(w) ? "意外命中" : "未收录 ✓")));
+// ---- 渲染结构验证（buildLocalResult 是内容脚本真正拿到的数据）----
+console.log("\n气泡渲染数据结构（后台返回给内容脚本的形态）：");
+const shapeCases = ["efficiency", "implementations"];
+let shapeOk = 0;
+for (const w of shapeCases) {
+  const r = lookupLocal(w);
+  if (!r) continue;
+  const res = buildLocalResult(r);
+  const ok = res.source === "local" &&
+    typeof res.display === "string" &&
+    Array.isArray(res.groups) && res.groups.length > 0 &&
+    res.groups.every(g => typeof g.pos === "string" && typeof g.text === "string") &&
+    typeof res.plain === "string" &&
+    (res.tier === "core" || res.tier === "extra");
+  if (ok) shapeOk++;
+  console.log("  " + w.padEnd(18) + (ok ? "结构完整 ✓" : "结构异常 ✗") +
+    "   tier=" + res.tier + "  groups=" + res.groups.length +
+    "  phonetic=" + JSON.stringify(res.phonetic || ""));
+}
+const shapeFail = shapeCases.length - shapeOk;
+if (shapeFail) { fail += shapeFail; }
+else { pass++; }
 
+// 未收录词检查（应走在线）。
+// 注意：quantum / heuristic 这类词已被 3 万词扩展库收录（走本地命中更省钱），
+// 所以这里只留真正查不到的词形——随机串与极少见的专名。
+const unknown = ["zzzzqqq", "qwertyx", "blorptastic"];
+console.log("\n未收录词（预期走在线兜底）：");
+let unknownMiss = 0;
+unknown.forEach(w => {
+  const hit = lookupLocal(w);
+  if (!hit) unknownMiss++;
+  console.log("  " + w.padEnd(14) + (hit ? "意外命中 " + hit.matched : "未收录 ✓"));
+});
+if (unknownMiss === unknown.length) pass++;
+else { fail++; fails.push("未收录词断言失败 " + unknownMiss + "/" + unknown.length); }
+
+// ---- 正向锁定"变体直命中"行为 ----
+// 这些词在 ECDICT 里有独立词条，应当直命中自身（inflected=false），
+// 而不是被还原成词根。锁住它，避免将来有人改坏还原优先级。
+console.log("\n变体形式有独立词条时直命中（正确行为，非缺陷）：");
+let directOk = 0;
+const directCases = ["running", "generated", "children", "matched", "provided"];
+for (const w of directCases) {
+  const r = lookupLocal(w);
+  const isDirect = !!r && r.matched === w && !r.inflected;
+  if (isDirect) directOk++;
+  console.log("  " + w.padEnd(14) + (isDirect ? "直命中 ✓" : "被还原为 " + (r ? r.matched : "未命中") + " ✗") +
+    (r ? "   → " + String(r.entry.t).slice(0, 30) : ""));
+}
+if (directOk === directCases.length) pass++;
+else { fail++; fails.push("变体直命中用例失败 " + directOk + "/" + directCases.length); }
+
+console.log("\n通过 " + pass + " / " + (pass + fail));
 console.log("\n" + (fail === 0 ? "全部通过 ✓" : "存在失败项 ✗"));
 process.exit(fail === 0 ? 0 : 1);

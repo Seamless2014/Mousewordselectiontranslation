@@ -1,18 +1,23 @@
 /**
  * 扩展词库验证（开发自测，无依赖）。
  *
- * 校验 dict-extra.js（ECDICT 生成）与 content.js 的两级查词逻辑：
+ * 校验 dict-extra.js（ECDICT 生成）与两级查词逻辑：
  *   1. dict-extra.js 可解析、键全为纯小写字母、无重复键
  *   2. 词条结构完整（t 非空、p/k 为字符串）
  *   3. 精选词库 dict.js 优先于扩展词库（同词条时不被覆盖）
- *   4. 词形还原在扩展词库中同样生效（works -> work 走扩展库）
+ *   4. 词形还原在扩展词库中同样生效
  *   5. 不污染原型链（__proto__ / constructor / toString 不应命中）
  *   6. 常用词覆盖率抽样（BNC 高频词应有释义）
+ *
+ * v1.2.0 起，查词逻辑只保留 **一份实现**（dict-lookup.js）。
+ * 本测试直接加载该文件，不再复刻副本 —— 之前 test-extra.js / test-verify.js /
+ * content.js 各存一份 lemmatize，改一处要同步三处，是明确的技术债。
  *
  * 运行：node test-extra.js
  */
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 const DIR = __dirname;
 
 let pass = 0, fail = 0;
@@ -26,21 +31,27 @@ console.log("=".repeat(58));
 console.log("扩展词库（ECDICT）验证");
 console.log("=".repeat(58));
 
-// ---------- 载入两个词库 ----------
-function loadDict(file, varName) {
-  const src = fs.readFileSync(path.join(DIR, file), "utf8")
-    .replace(/^(?:const|var|let)\s+(\w+)\s*=/m, "globalThis.$1 =");
-  (new Function(src)).call(globalThis);
-  return globalThis[varName];
-}
-
-const LOCAL_DICT = loadDict("dict.js", "LOCAL_DICT");
+// ---------- 在同一个 vm 上下文中加载「词库 + 查词模块」，复刻后台装配 ----------
 const extraPath = path.join(DIR, "dict-extra.js");
 const hasExtra = fs.existsSync(extraPath);
-const DICT_EXTRA = hasExtra ? loadDict("dict-extra.js", "DICT_EXTRA") : null;
+
+const sandbox = { console };
+vm.createContext(sandbox);
+["dict.js", "dict-extra.js", "dict-lookup.js"].forEach(f => {
+  const p = path.join(DIR, f);
+  if (!fs.existsSync(p)) return; // dict-extra.js 缺失时后面单独断言
+  vm.runInContext(fs.readFileSync(p, "utf8"), sandbox, { filename: f });
+});
+
+const LOCAL_DICT = sandbox.LOCAL_DICT;
+const DICT_EXTRA = sandbox.DICT_EXTRA;
+const lookupInDict = sandbox.lookupInDict;
+const lemmatize = sandbox.lemmatize;
 
 check("dict-extra.js 存在", hasExtra);
 check("LOCAL_DICT 可解析", !!LOCAL_DICT && typeof LOCAL_DICT === "object");
+check("dict-lookup.js 提供 lookupInDict", typeof lookupInDict === "function");
+check("dict-lookup.js 提供 lemmatize", typeof lemmatize === "function");
 
 if (!hasExtra || !DICT_EXTRA) {
   console.log(log.join("\n"));
@@ -48,9 +59,13 @@ if (!hasExtra || !DICT_EXTRA) {
   process.exit(1);
 }
 
+// 用共享实现查词（等价于后台 lookupLocal）
+const lookupLocal = sandbox.lookupLocal;
+
 const coreN = Object.keys(LOCAL_DICT).length;
 const extraN = Object.keys(DICT_EXTRA).length;
-console.log("精选词库：" + coreN + " 条   扩展词库：" + extraN + " 条   合计：" + (coreN + extraN) + " 条\n");
+console.log("精选词库：" + coreN + " 条   扩展词库：" + extraN + " 条   合计：" + (coreN + extraN) + " 条");
+console.log("查词逻辑来源：dict-lookup.js（单一实现，无副本）\n");
 
 check("扩展词库条目数 ≥ 10000", extraN >= 10000, "实际 " + extraN);
 
@@ -90,90 +105,23 @@ for (const k of keys) {
 }
 check("释义长度受控（≤60 字）", tooLong === 0, "最长 " + maxLen + " 字，超限 " + tooLong + " 个");
 
-// ---------- 3/4. 两级查词逻辑（复刻 content.js 的 lookupLocal）----------
-const IRREGULAR = {
-  was: "be", were: "be", been: "be", is: "be", are: "be", am: "be",
-  has: "have", had: "have", did: "do", does: "do", done: "do",
-  went: "go", gone: "go", made: "make", took: "take", taken: "take",
-  gave: "give", given: "give", found: "find", knew: "know", known: "know",
-  thought: "think", saw: "see", seen: "see", said: "say", told: "tell",
-  became: "become", left: "leave", kept: "keep", began: "begin", begun: "begin",
-  ran: "run", brought: "bring", wrote: "write", written: "write",
-  stood: "stand", lost: "lose", paid: "pay", met: "meet", led: "lead",
-  understood: "understand", spoke: "speak", spoken: "speak", read: "read",
-  spent: "spend", grew: "grow", grown: "grow", won: "win", built: "build",
-  fell: "fall", sold: "sell", broke: "break", broken: "break",
-  ate: "eat", eaten: "eat", caught: "catch", drew: "draw", drawn: "draw",
-  chose: "choose", chosen: "choose", children: "child", men: "man",
-  women: "woman", feet: "foot", teeth: "tooth", mice: "mouse",
-  lives: "life", better: "good", best: "good", worse: "bad", worst: "bad",
-  more: "much", most: "much", less: "little", least: "little",
-  analyses: "analysis", indices: "index"
-};
-
-function lemmatize(word) {
-  const w = word.toLowerCase();
-  if (IRREGULAR[w]) return IRREGULAR[w];
-  if (w.length <= 3) return w;
-  const cands = [];
-  if (w.endsWith("ies")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ves")) cands.push(w.slice(0, -3) + "f", w.slice(0, -3) + "fe");
-  if (w.endsWith("ses") || w.endsWith("xes") || w.endsWith("zes") ||
-      w.endsWith("ches") || w.endsWith("shes")) cands.push(w.slice(0, -2));
-  if (w.endsWith("es")) cands.push(w.slice(0, -1), w.slice(0, -2));
-  if (w.endsWith("s") && !w.endsWith("ss")) cands.push(w.slice(0, -1));
-  if (w.endsWith("ying")) cands.push(w.slice(0, -4) + "ie", w.slice(0, -4) + "y");
-  if (w.endsWith("ing")) {
-    cands.push(w.slice(0, -3), w.slice(0, -3) + "e");
-    const stem = w.slice(0, -3);
-    if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) cands.push(stem.slice(0, -1));
-  }
-  if (w.endsWith("ied")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ed")) {
-    cands.push(w.slice(0, -2), w.slice(0, -1));
-    const stem = w.slice(0, -2);
-    if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) cands.push(stem.slice(0, -1));
-  }
-  if (w.endsWith("ier")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("iest")) cands.push(w.slice(0, -4) + "y");
-  if (w.endsWith("er")) cands.push(w.slice(0, -2), w.slice(0, -1));
-  if (w.endsWith("est")) cands.push(w.slice(0, -3), w.slice(0, -2));
-  if (w.endsWith("ily")) cands.push(w.slice(0, -3) + "y");
-  if (w.endsWith("ly")) cands.push(w.slice(0, -2), w.slice(0, -2) + "e");
-  return cands.length ? cands : w;
-}
-
-function lookupInDict(dict, key) {
-  if (!dict || typeof dict !== "object") return null;
-  if (!Object.prototype.hasOwnProperty.call(dict, key)) return null;
-  const entry = dict[key];
-  return entry && typeof entry === "object" ? entry : null;
-}
-
-// 复刻 content.js 的 lookupLocal（含 inflected 标记）
-function lookupLocal(raw) {
-  const w = raw.toLowerCase();
-  const dicts = [LOCAL_DICT, DICT_EXTRA];
-  for (const d of dicts) {
-    const h = lookupInDict(d, w);
-    if (h) return { key: w, entry: h, tier: d === LOCAL_DICT ? "core" : "extra", inflected: false };
-  }
-  const res = lemmatize(w);
-  const cands = typeof res === "string" ? [res] : (Array.isArray(res) ? res : []);
-  for (const c of cands) {
-    if (!c || c === w) continue;
-    for (const d of dicts) {
-      const h = lookupInDict(d, c);
-      if (h) return { key: c, entry: h, tier: d === LOCAL_DICT ? "core" : "extra", inflected: true };
-    }
-  }
-  return null;
-}
-
+// ---------- 3/4. 两级查词逻辑（直接来自 dict-lookup.js，非副本）----------
 // 同键时精选词库应优先
-const overlap = keys.filter(k => Object.prototype.hasOwnProperty.call(LOCAL_DICT, k));
+const overlap = Object.keys(DICT_EXTRA).filter(k => Object.prototype.hasOwnProperty.call(LOCAL_DICT, k));
 check("扩展词库与精选词库无同键冲突", overlap.length === 0,
   overlap.length ? "冲突键示例：" + overlap.slice(0, 5).join(", ") + "（共 " + overlap.length + " 个）" : "");
+
+// 同词既在核心库也在扩展库时，tier 必须为 core
+{
+  const shared = Object.keys(DICT_EXTRA).find(k => Object.prototype.hasOwnProperty.call(LOCAL_DICT, k));
+  if (shared) {
+    const r = lookupLocal(shared);
+    check("同键时精选词库优先（tier=core）", r && r.tier === "core",
+      shared + " → " + (r ? r.tier : "未命中"));
+  } else {
+    check("同键时精选词库优先（无同键数据，跳过）", true);
+  }
+}
 
 // 词形还原应能在扩展库命中。
 //
@@ -193,8 +141,8 @@ const inflectionCases = [
 let infPass = 0; const infFails = [];
 for (const [input, expect] of inflectionCases) {
   const r = lookupLocal(input);
-  if (r && r.key === expect) infPass++;
-  else infFails.push(input + " → 期望 " + expect + "，实际 " + (r ? r.key : "未命中"));
+  if (r && r.matched === expect) infPass++;
+  else infFails.push(input + " → 期望 " + expect + "，实际 " + (r ? r.matched : "未命中"));
 }
 check("词形还原在扩展库生效（" + inflectionCases.length + " 例）",
   infPass === inflectionCases.length, infFails.join("; "));
@@ -202,8 +150,8 @@ check("词形还原在扩展库生效（" + inflectionCases.length + " 例）",
 // 变体形式有独立词条时应"直命中变体"，这也是正确行为（ECDICT 的释义更精确）
 const directHit = lookupLocal("negotiated");
 check("库里已有变体词条时直命中变体（negotiated 而非 negotiate）",
-  !!directHit && directHit.key === "negotiated" && !directHit.inflected,
-  directHit ? "实际命中 " + directHit.key : "未命中");
+  !!directHit && directHit.matched === "negotiated" && !directHit.inflected,
+  directHit ? "实际命中 " + directHit.matched : "未命中");
 
 // ---------- 5. 原型链污染 ----------
 // constructor 是 ECDICT 中的真实英文单词（建造者），因此会被收录；

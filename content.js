@@ -1,11 +1,18 @@
 /**
- * 悬停取词翻译 —— 内容脚本
+ * 悬停取词翻译 —— 内容脚本（轻壳）
  *
  * 职责：
- *  1. 监听鼠标悬停，提取光标下的英文单词并做词形还原
- *  2. 本地词库优先命中（零延迟），未命中走在线兜底
+ *  1. 监听鼠标悬停，提取光标下的英文单词
+ *  2. 向后台查离线词库（HT_LOOKUP），未命中再走在线兜底（HT_TRANSLATE）
  *  3. 用跟随鼠标的气泡展示释义，鼠标离开自动消失
  *  4. 悬浮球开关 / 右键菜单 / 快捷键 三种启停方式
+ *
+ * v1.2.0 架构调整：本文件**不再包含词库**。
+ *  改造前 dict.js / dict-extra.js 由 manifest 注入，而内容脚本是「每个 frame 一份
+ *  独立 JS 环境」，于是每个标签页、每个 iframe 都要各自解析并持有一份 3 万词词库
+ *  （堆约 8.7 MB），20 个标签页 × 5 个 iframe 就是约 870 MB。
+ *  现在词库由 service worker 全局持有一份，本文件只负责取词、请求、渲染。
+ *  词形还原与词条组装也一并移到后台（dict-lookup.js），避免双份实现漂移。
  */
 (function () {
   "use strict";
@@ -14,7 +21,12 @@
   if (window.__hoverTranslateInjected) return;
   window.__hoverTranslateInjected = true;
 
-  const HT_VERSION = "1.1.0";
+  const HT_VERSION = "1.2.0";
+
+  // 后台查词的超时保护：本地查词实测 1–3 ms，200 ms 已经非常宽松。
+  // 设这个上限是为了应对「service worker 正在重建」等极端情况 ——
+  // 超时后不报错，直接走在线兜底，用户无感。
+  const LOCAL_LOOKUP_TIMEOUT = 200;
 
   // ---------- 状态 ----------
   const state = {
@@ -29,140 +41,48 @@
     currentWord: null,      // 当前正在展示的词
     reqSeq: 0,              // 请求序号，用于丢弃过期响应
     cache: new Map(),       // 运行时缓存 word -> result
+    dictInfo: null,         // 后台词库信息（用于调试与 popup 回退展示）
     mouseX: 0,
     mouseY: 0,
     frameHidden: false      // 若在不可见 iframe 中则禁用
   };
 
-  // ---------- 词形还原 ----------
-  // 规则表：后缀 -> 候选还原方式（按优先级）
-  const IRREGULAR = {
-    was: "be", were: "be", been: "be", is: "be", are: "be", am: "be",
-    has: "have", had: "have", did: "do", does: "do", done: "do",
-    went: "go", gone: "go", made: "make", took: "take", taken: "take",
-    gave: "give", given: "give", found: "find", knew: "know", known: "know",
-    thought: "think", saw: "see", seen: "see", wanted: "want",
-    said: "say", told: "tell", became: "become", left: "leave",
-    kept: "keep", began: "begin", begun: "begin", ran: "run",
-    brought: "bring", wrote: "write", written: "write", stood: "stand",
-    lost: "lose", paid: "pay", met: "meet", led: "lead",
-    understood: "understand", spoke: "speak", spoken: "speak",
-    read: "read", spent: "spend", grew: "grow", grown: "grow",
-    won: "win", offered: "offer", built: "build", fell: "fall",
-    fell2: "fall", cut: "cut", reached: "reach", remained: "remain",
-    suggested: "suggest", raised: "raise", passed: "pass", sold: "sell",
-    required: "require", reported: "report", decided: "decide",
-    returned: "return", explained: "explain", developed: "develop",
-    carried: "carry", broke: "break", broken: "break", received: "receive",
-    agreed: "agree", produced: "produce", ate: "eat", eaten: "eat",
-    covered: "cover", caught: "catch", drew: "draw", drawn: "draw",
-    chose: "choose", chosen: "choose", caused: "cause",
-    children: "child", men: "man", women: "woman", feet: "foot",
-    teeth: "tooth", mice: "mouse", people: "people", lives: "life",
-    better: "good", best: "good", worse: "bad", worst: "bad",
-    more: "much", most: "much", less: "little", least: "little",
-    data: "data", analyses: "analysis", indices: "index"
-  };
+  // ---------- 离线查词（转发给后台）----------
+  // 词形还原、两级词库优先级、词条结构组装全部在 service worker 侧完成
+  // （见 dict-lookup.js），内容脚本只关心"给我一个能画的结果"。
 
   /**
-   * 词形还原。
-   * 返回值有两种形态：
-   *   - 命中不规则词表时返回 string（唯一原形，如 running -> run 中 was -> "be"）
-   *   - 否则返回候选词数组（按优先级排列），交由调用方逐个查词库
+   * 向后台请求离线查词。
+   *
+   * @param {string} word 原始单词（大小写不限）
+   * @returns {Promise<object|null>} 命中返回渲染就绪的结果对象，未命中/失败返回 null
    */
-  function lemmatize(word) {
-    const w = word.toLowerCase();
-    if (IRREGULAR[w]) return IRREGULAR[w];
-    if (w.length <= 3) return w;
+  function requestLocal(word) {
+    return new Promise(resolve => {
+      let settled = false;
+      const done = v => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
 
-    const cands = [];
-    // 复数 / 第三人称单数
-    if (w.endsWith("ies")) cands.push(w.slice(0, -3) + "y");
-    if (w.endsWith("ves")) cands.push(w.slice(0, -3) + "f", w.slice(0, -3) + "fe");
-    if (w.endsWith("ses") || w.endsWith("xes") || w.endsWith("zes") ||
-        w.endsWith("ches") || w.endsWith("shes")) cands.push(w.slice(0, -2));
-    if (w.endsWith("es")) cands.push(w.slice(0, -1), w.slice(0, -2));
-    if (w.endsWith("s") && !w.endsWith("ss")) cands.push(w.slice(0, -1));
-    // 进行时 / 动名词
-    if (w.endsWith("ying")) cands.push(w.slice(0, -4) + "ie", w.slice(0, -4) + "y");
-    if (w.endsWith("ing")) {
-      cands.push(w.slice(0, -3), w.slice(0, -3) + "e");
-      // 双写辅音：running -> run
-      const stem = w.slice(0, -3);
-      if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
-        cands.push(stem.slice(0, -1));
+      // 超时兜底：后台忙/正在重建时不阻塞，直接交给在线通道
+      const timer = setTimeout(() => done(null), LOCAL_LOOKUP_TIMEOUT);
+
+      let sent = false;
+      try {
+        const ret = chrome.runtime.sendMessage({ type: "HT_LOOKUP", word: word }, resp => {
+          if (chrome.runtime.lastError) { done(null); return; }
+          if (resp && resp.ok && resp.found && resp.result) done(resp.result);
+          else done(null);
+        });
+        sent = true;
+        // 极少数环境下 sendMessage 返回 Promise 而不回调（无回调参数时），
+        // 这里保留返回值仅用于吞掉未处理的 rejection，避免控制台噪音。
+        if (ret && typeof ret.then === "function") ret.catch(() => {});
+      } catch (_) {
+        // 扩展重载后旧页面残留脚本会同步抛 "Extension context invalidated"
+        done(null);
       }
-    }
-    // 过去式 / 过去分词
-    if (w.endsWith("ied")) cands.push(w.slice(0, -3) + "y");
-    if (w.endsWith("ed")) {
-      cands.push(w.slice(0, -2), w.slice(0, -1));
-      const stem = w.slice(0, -2);
-      if (stem.length > 2 && stem[stem.length - 1] === stem[stem.length - 2]) {
-        cands.push(stem.slice(0, -1));
-      }
-    }
-    // 比较级 / 最高级
-    if (w.endsWith("ier")) cands.push(w.slice(0, -3) + "y");
-    if (w.endsWith("iest")) cands.push(w.slice(0, -4) + "y");
-    if (w.endsWith("er")) cands.push(w.slice(0, -2), w.slice(0, -1));
-    if (w.endsWith("est")) cands.push(w.slice(0, -3), w.slice(0, -2));
-    // 副词
-    if (w.endsWith("ily")) cands.push(w.slice(0, -3) + "y");
-    if (w.endsWith("ly")) cands.push(w.slice(0, -2), w.slice(0, -2) + "e");
-
-    return cands.length ? cands : w;
-  }
-
-  /**
-   * 在单个词库对象中查词。
-   * @param {object} dict 词库对象（LOCAL_DICT 或 DICT_EXTRA）
-   * @param {string} key  小写单词
-   * @returns {object|null} 命中则返回词条对象
-   */
-  function lookupInDict(dict, key) {
-    if (!dict || typeof dict !== "object") return null;
-    // 兼容 __proto__ / constructor 等原型链上的名字，避免误命中
-    if (!Object.prototype.hasOwnProperty.call(dict, key)) return null;
-    const entry = dict[key];
-    return entry && typeof entry === "object" ? entry : null;
-  }
-
-  /**
-   * 依次尝试：原词 -> 各还原候选，返回首个命中的词条。
-   * 查询顺序：精选词库 dict.js 优先（释义更精炼、词性更准），
-   * 未命中再查 ECDICT 扩展词库 dict-extra.js。
-   * 这样精选词条的展示质量不会被机器生成的释义覆盖。
-   */
-  function lookupLocal(rawWord) {
-    // 两个词库都缺失时降级为纯在线模式，不让异常中断取词流程
-    const hasMain = typeof LOCAL_DICT === "undefined" ? false : !!LOCAL_DICT;
-    const hasExtra = typeof DICT_EXTRA === "undefined" ? false : !!DICT_EXTRA;
-    if (!hasMain && !hasExtra) return null;
-
-    const w = rawWord.toLowerCase();
-    const dicts = [];
-    if (hasMain) dicts.push(LOCAL_DICT);
-    if (hasExtra) dicts.push(DICT_EXTRA);
-
-    // 按词库优先级依次查：先原词，再还原候选
-    for (const dict of dicts) {
-      const hit = lookupInDict(dict, w);
-      if (hit) return { word: w, entry: hit, matched: w };
-    }
-
-    const res = lemmatize(w);
-    // lemmatize 命中不规则词表时直接返回字符串（唯一原形），否则返回候选数组
-    const cands = typeof res === "string" ? [res] : (Array.isArray(res) ? res : []);
-
-    for (const c of cands) {
-      if (!c || c === w) continue;
-      for (const dict of dicts) {
-        const hit = lookupInDict(dict, c);
-        if (hit) return { word: w, entry: hit, matched: c, inflected: true };
-      }
-    }
-    return null;
+      // 防御：若 sendMessage 既没回调也没抛错（理论上不会），超时已兜住
+      if (!sent) done(null);
+    });
   }
 
   // ---------- 取词 ----------
@@ -353,24 +273,27 @@
   }
 
   // ---------- 翻译主流程 ----------
-  function translateWord(rawWord) {
+  async function translateWord(rawWord) {
     const seq = ++state.reqSeq;
+    const key = rawWord.toLowerCase();
 
     // 命中缓存
-    const cached = state.cache.get(rawWord.toLowerCase());
+    const cached = state.cache.get(key);
     if (cached) {
       renderResult(cached);
       showBubble();
       return;
     }
 
-    // 1) 本地词库
-    const local = lookupLocal(rawWord);
+    // 1) 离线词库（后台集中持有）。
+    //    官方精选词条命中率约 93%，所以"先加载态、后结果"不会闪 ——
+    //    正常情况下后台 1–3 ms 就返回，加载态根本来不及出现。
+    const local = await requestLocal(rawWord);
+    if (seq !== state.reqSeq) return; // 已被更晚的请求取代（鼠标已移到别的词）
+
     if (local) {
-      const res = buildLocalResult(local);
-      state.cache.set(rawWord.toLowerCase(), res);
-      if (seq !== state.reqSeq) return; // 已被更晚的请求取代
-      renderResult(res);
+      state.cache.set(key, local);
+      renderResult(local);
       showBubble();
       return;
     }
@@ -385,8 +308,16 @@
       return;
     }
 
-    // 加载态延迟 180ms 才显示：网络快时（<180ms 返回）用户直接看到结果，
-    // 不会被"查询中…"闪一下，等待感更弱。
+    requestOnline(rawWord, seq);
+  }
+
+  /**
+   * 在线兜底通道。
+   *
+   * 加载态延迟 180ms 才显示：网络快时（<180ms 返回）用户直接看到结果，
+   * 不会被"查询中…"闪一下，等待感更弱。
+   */
+  function requestOnline(rawWord, seq) {
     const loadingTimer = setTimeout(() => {
       if (seq !== state.reqSeq) return;
       renderLoading(rawWord);
@@ -424,38 +355,6 @@
       clearTimeout(loadingTimer);
       renderError(rawWord, "扩展已更新，请刷新页面（F5）后使用");
     }
-  }
-
-  function buildLocalResult(local) {
-    const entry = local.entry;
-    const groups = [];
-    const posList = (entry.p || "").split("/").filter(Boolean);
-    const defs = (entry.t || "").split(/[；;]/).map(s => s.trim()).filter(Boolean);
-
-    if (posList.length > 1 && defs.length > 1) {
-      // 多词性：按前 N-1 个词性分组展示（粗略映射）
-      const per = Math.ceil(defs.length / posList.length);
-      posList.forEach((p, i) => {
-        const chunk = defs.slice(i * per, (i + 1) * per).join("；");
-        if (chunk) groups.push({ pos: p, text: chunk });
-      });
-    } else {
-      groups.push({ pos: posList[0] || "", text: defs.join("；") });
-    }
-
-    return {
-      word: local.word,
-      matched: local.matched,
-      display: local.word,
-      // ECDICT 扩展词库带 k（音标）字段；精选词库 dict.js 通常没有
-      phonetic: entry.k || "",
-      inflected: !!local.inflected,
-      groups: groups,
-      plain: entry.t,
-      source: "local",
-      // 标记词条来源，气泡角标可区分"精选词库 / 扩展词库"
-      tier: entry.k !== undefined ? "extra" : "core"
-    };
   }
 
   // ---------- 事件绑定 ----------
@@ -503,7 +402,9 @@
       return; // 同一个词且气泡已在显示，不重复查询
     }
     state.currentWord = w;
-    translateWord(hit.word);
+    // translateWord 是 async：这里 deliberately 不 await，
+    // 它内部用 reqSeq 自行丢弃过期响应，不会阻塞后续鼠标事件。
+    translateWord(hit.word).catch(() => {});
   }
 
   function onMouseOutWindow(e) {
@@ -628,6 +529,7 @@
     ensureBall();
     listenStorage();
     listenMessages();
+    probeDictInfo();
 
     document.addEventListener("mousemove", onMouseMove, { passive: true, capture: true });
     document.addEventListener("mouseout", onMouseOutWindow, true);
@@ -639,6 +541,30 @@
     try {
       console.info("%c[悬停取词翻译] v" + HT_VERSION + " 已加载，悬停英文单词即可翻译",
         "color:#4a8cff;font-weight:600");
+    } catch (_) {}
+  }
+
+  /**
+   * 拉取后台词库信息（词条数 / 可用状态）。
+   *
+   * 目的不是功能必需，而是排障：v1.1 时代词库跟内容脚本同域，控制台能直接
+   * 看到 LOCAL_DICT 有多少条；现在词库在 worker 里，这里主动问一次并打印，
+   * 保持同等可观测性。失败静默，不影响取词。
+   */
+  function probeDictInfo() {
+    try {
+      chrome.runtime.sendMessage({ type: "HT_DICT_INFO" }, resp => {
+        if (chrome.runtime.lastError) return;
+        if (!resp || !resp.ok) {
+          console.warn("[悬停取词翻译] 后台词库未就绪，本次仅能使用在线翻译");
+          return;
+        }
+        state.dictInfo = resp;
+        try {
+          console.info("[悬停取词翻译] 离线词库已就绪：精选 " + resp.core +
+            " 条 + 扩展 " + resp.extra + " 条 = " + resp.total + " 条（由后台统一持有）");
+        } catch (_) {}
+      });
     } catch (_) {}
   }
 

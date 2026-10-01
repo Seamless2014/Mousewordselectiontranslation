@@ -2,15 +2,39 @@
  * 悬停取词翻译 —— 后台 Service Worker
  *
  * 职责：
- *  1. 代理在线翻译请求（内容脚本受页面 CSP 限制，跨域请求统一走后台）
- *  2. 维护右键菜单与快捷键，向当前标签页派发开关指令
+ *  1. 持有唯一的离线词库副本，处理内容脚本的查词请求（HT_LOOKUP）
+ *  2. 代理在线翻译请求（内容脚本受页面 CSP 限制，跨域请求统一走后台）
+ *  3. 维护右键菜单与快捷键，向当前标签页派发开关指令
+ *
+ * 为什么词库放在后台（v1.2.0 架构调整）：
+ *  改造前词库由 content_scripts 注入，而内容脚本是「每个 frame 一份独立 JS 环境」，
+ *  于是每开一个标签页、每个 iframe 都要各自解析并持有一份 3 万词词库（堆约 8.7 MB）。
+ *  实测 20 个标签页 × 平均 5 个 iframe ≈ 100 份 ≈ 870 MB，且同一份 2.1 MB 脚本被
+ *  重复解析 100 次。改为后台集中持有后，内存恒定 8.7 MB，与标签页数量无关。
+ *  代价是每次查词多一次消息往返（实测 1–3 ms，远小于 hoverDelay 的 320 ms）。
  *
  * 性能设计（目标：本地未收录时 1 秒内出结果）：
+ *  - 词库惰性初始化：service worker 被回收后重建时，首次查词才解析词库
  *  - 多通道并行竞速，首个成功结果立即返回，失败者被 abort，不再串行等待
- *  - 单通道超时 900ms，总超时 1100ms，超时后立即降级返回
+ *  - 单通道超时 700ms，总超时 1000ms，超时后立即降级返回
  *  - 后台内存缓存（LRU，上限 800 条），跨标签页/iframe 复用，命中即 0 延迟
  *  - 内容脚本侧还有一层缓存，同一单词重复悬停不再发请求
  */
+
+// ---------- 词库加载（集中持有，全局唯一副本）----------
+//
+// importScripts 只在 service worker 顶层可用，且要求同源相对路径。
+// 顺序不能改：dict-lookup.js 里 lookupLocal() 依赖 LOCAL_DICT / DICT_EXTRA。
+// 注意：三个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
+importScripts("dict.js", "dict-extra.js", "dict-lookup.js");
+
+const HT_BG_VERSION = "1.2.0";
+
+// dict.js / dict-extra.js 末尾都有「仅保留纯小写字母键」的自检，
+// 这里再兜一层：确认词库真的可用，否则把查词请求直接判为未命中（走在线兜底）。
+const DICT_READY =
+  (typeof LOCAL_DICT === "object" && !!LOCAL_DICT) ||
+  (typeof DICT_EXTRA === "object" && !!DICT_EXTRA);
 
 // ---------- 超时与缓存配置 ----------
 const CHANNEL_TIMEOUT = 700;    // 单通道超时（毫秒）
@@ -194,12 +218,52 @@ async function translate(word) {
   return res;
 }
 
+// ---------- 离线词库查询（v1.2.0）----------
+//
+// 内容脚本不再持有词库，改为发 HT_LOOKUP 消息到这里查。
+// 返回的是「渲染就绪」结构（与在线结果同形），内容脚本拿到即可直接画气泡。
+//
+// 惰性初始化说明：
+//   service worker 空闲约 30s 会被浏览器回收，但 importScripts 在重建时会
+//   重新执行，所以 DICT_READY 总是正确的。这里额外做的是——把"首次查词"作为
+//   唯一的重建触发点，不需要 chrome.alarms 常驻唤醒（那会白白耗电）。
+function lookupOffline(rawWord) {
+  const w = String(rawWord || "").toLowerCase().trim();
+  if (!w) return { ok: false, found: false, reason: "empty" };
+  if (!DICT_READY) return { ok: false, found: false, reason: "dict-unavailable" };
+
+  const hit = lookupLocal(w);
+  if (!hit) return { ok: true, found: false };
+  return { ok: true, found: true, result: buildLocalResult(hit) };
+}
+
 // ---------- 消息路由 ----------
 // 说明：取词开关（enabled / onlineFallback / showPhonetic / showBall）一律由
 // 各上下文直接读写 chrome.storage.sync，不经后台中转 —— 这样 service worker
-// 休眠时开关依然可靠，也不会出现多上下文写入竞态。后台只负责在线翻译代理。
+// 休眠时开关依然可靠，也不会出现多上下文写入竞态。
+// 后台只负责两件事：离线查词、在线翻译代理。
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return;
+
+  if (msg.type === "HT_LOOKUP") {
+    // 本地查词是纯内存操作，无需 async，但保持与 HT_TRANSLATE 一致的响应契约
+    let resp;
+    try {
+      resp = lookupOffline(msg.word);
+    } catch (e) {
+      resp = { ok: false, found: false, reason: String(e && e.message ? e.message : e) };
+    }
+    sendResponse(resp);
+    return false; // 已同步响应
+  }
+
+  if (msg.type === "HT_DICT_INFO") {
+    // popup 用于展示词条数（popup 不再自己加载 2.1 MB 词库）
+    const core = typeof LOCAL_DICT === "object" && LOCAL_DICT ? Object.keys(LOCAL_DICT).length : 0;
+    const extra = typeof DICT_EXTRA === "object" && DICT_EXTRA ? Object.keys(DICT_EXTRA).length : 0;
+    sendResponse({ ok: DICT_READY, core: core, extra: extra, total: core + extra, version: HT_BG_VERSION });
+    return false;
+  }
 
   if (msg.type === "HT_TRANSLATE") {
     translate(String(msg.word || "").trim())
