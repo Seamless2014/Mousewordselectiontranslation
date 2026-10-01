@@ -1,0 +1,9 @@
+# 统一按 LF 存储，避免 Windows/macOS/Linux 之间克隆时改写换行符产生满屏 diff。
+# 之前每次 git add 都刷 "LF will be replaced by CRLF" 警告，就是这个原因。
+* text=auto eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary

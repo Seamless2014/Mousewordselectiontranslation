@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>悬停取词翻译</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    width: 292px;
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    color: #1f2328;
+    background: #ffffff;
+  }
+  .hd {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px 12px;
+    background: linear-gradient(135deg, #4a8cff 0%, #6b5cff 100%);
+    color: #fff;
+  }
+  .hd h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .3px; }
+  .hd .sub { font-size: 11px; opacity: .82; margin-top: 3px; }
+  .sw {
+    position: relative;
+    width: 42px; height: 23px;
+    background: rgba(255,255,255,.32);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background .18s;
+    flex: 0 0 auto;
+  }
+  .sw::after {
+    content: "";
+    position: absolute;
+    top: 2.5px; left: 2.5px;
+    width: 18px; height: 18px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .18s;
+    box-shadow: 0 1px 3px rgba(0,0,0,.2);
+  }
+  .sw.on { background: rgba(255,255,255,.55); }
+  .sw.on::after { transform: translateX(19px); }
+
+  .body { padding: 6px 16px 4px; }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid #f1f2f4;
+  }
+  .row:last-child { border-bottom: none; }
+  .row .label { font-size: 13px; color: #1f2328; }
+  .row .hint { font-size: 11px; color: #8b93a2; margin-top: 2px; line-height: 1.45; }
+  .row .txt { flex: 1 1 auto; min-width: 0; }
+
+  /* 小型开关 */
+  .tsw {
+    position: relative;
+    width: 38px; height: 21px;
+    background: #d5d8dd;
+    border-radius: 11px;
+    cursor: pointer;
+    transition: background .18s;
+    flex: 0 0 auto;
+  }
+  .tsw::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 17px; height: 17px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .18s;
+    box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  }
+  .tsw.on { background: #4a8cff; }
+  .tsw.on::after { transform: translateX(17px); }
+
+  select, input[type=range] {
+    font-family: inherit;
+    font-size: 12px;
+    color: #1f2328;
+  }
+  select {
+    padding: 4px 7px;
+    border: 1px solid #d9dce0;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    outline: none;
+  }
+  select:focus { border-color: #4a8cff; }
+
+  input[type=range] {
+    width: 108px;
+    accent-color: #4a8cff;
+    cursor: pointer;
+  }
+  .range-wrap { display: flex; align-items: center; gap: 8px; }
+  .range-val {
+    font-size: 12px; color: #4a8cff; font-weight: 600;
+    min-width: 38px; text-align: right;
+  }
+
+  .ft {
+    padding: 9px 16px 13px;
+    border-top: 1px solid #f1f2f4;
+    font-size: 11px;
+    color: #8b93a2;
+    line-height: 1.6;
+    background: #fafbfc;
+  }
+  .ft kbd {
+    display: inline-block;
+    padding: 0 4px;
+    font-family: inherit;
+    font-size: 10.5px;
+    color: #4c5158;
+    background: #fff;
+    border: 1px solid #dbdee2;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    line-height: 15px;
+  }
+  .status {
+    margin: 0 16px 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    display: none;
+  }
+  .status.show { display: block; }
+  .status.info { color: #2b6cb0; background: #eaf2fd; }
+  .status.warn { color: #8a5a00; background: #fff6e2; }
+</style>
+</head>
+<body>
+  <div class="hd">
+    <div>
+      <h1>悬停取词翻译</h1>
+      <div class="sub">鼠标悬停英文单词，即时显示中文释义</div>
+    </div>
+    <div class="sw on" id="master" title="总开关"></div>
+  </div>
+
+  <div class="status info" id="status"></div>
+
+  <div class="body">
+    <div class="row">
+      <div class="txt">
+        <div class="label">在线兜底翻译</div>
+        <div class="hint">本地词库未收录时联网查询。关闭后完全离线，不发出任何请求。</div>
+      </div>
+      <div class="tsw on" id="online"></div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">显示音标</div>
+        <div class="hint">在线查询时附带显示英文音标。</div>
+      </div>
+      <div class="tsw on" id="phonetic"></div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">显示悬浮球</div>
+        <div class="hint">页面右下角显示快捷开关按钮。</div>
+      </div>
+      <div class="tsw on" id="ball"></div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">触发延迟</div>
+        <div class="hint">悬停多久后弹出释义，过短容易误触发。</div>
+      </div>
+      <div class="range-wrap">
+        <input type="range" id="delay" min="80" max="900" step="20" value="320">
+        <span class="range-val" id="delayVal">320ms</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">本地词库规模</div>
+        <div class="hint">内置常用词，离线零延迟命中。</div>
+      </div>
+      <span id="dictCount" style="font-size:12px;color:#4a8cff;font-weight:600;">—</span>
+    </div>
+  </div>
+
+  <div class="ft">
+    快捷键 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> 开关取词 ·
+    右键菜单也可切换 · 按 <kbd>Esc</kbd> 关闭当前气泡
+  </div>
+
+  <script src="dict.js"></script>
+  <script src="dict-extra.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

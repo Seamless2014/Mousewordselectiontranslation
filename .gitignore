@@ -1,0 +1,16 @@
+# 依赖与构建产物（本项目测试依赖装在全局隔离环境，不在仓库内）
+node_modules/
+package-lock.json
+
+# 词典构建的中间产物（ECDICT CSV 约 66MB，由 build-dict.js 按需下载生成）
+*.csv
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时与诊断文件
+_*.js
+*.log

@@ -1,0 +1,204 @@
+/* ===== 悬停取词翻译 —— 样式 =====
+   全部使用 ht- 前缀与高 z-index，尽量抵抗宿主页面样式污染。
+   使用 fixed 定位，坐标直接取自鼠标的 clientX/clientY。 */
+
+.ht-bubble {
+  position: fixed !important;
+  z-index: 2147483600 !important;
+  display: none;
+  max-width: 320px !important;
+  min-width: 132px !important;
+  padding: 10px 13px !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+  background: rgba(28, 30, 36, 0.96) !important;
+  color: #f2f4f8 !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 9px !important;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.34), 0 1px 3px rgba(0, 0, 0, 0.2) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif !important;
+  font-size: 13px !important;
+  line-height: 1.58 !important;
+  letter-spacing: 0.1px !important;
+  text-align: left !important;
+  direction: ltr !important;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.11s ease, transform 0.11s ease;
+  pointer-events: auto;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.ht-bubble.ht-show {
+  display: block !important;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 顶部：单词 + 音标 */
+.ht-bubble .ht-head {
+  display: flex !important;
+  align-items: baseline !important;
+  flex-wrap: wrap !important;
+  gap: 7px !important;
+  margin: 0 0 5px 0 !important;
+  padding: 0 !important;
+}
+
+.ht-bubble .ht-word {
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  color: #ffffff !important;
+  word-break: break-word !important;
+  font-style: normal !important;
+}
+
+.ht-bubble .ht-phonetic {
+  font-size: 11.5px !important;
+  color: #9aa3b2 !important;
+  font-weight: 400 !important;
+  font-family: "Segoe UI", Arial, sans-serif !important;
+  white-space: nowrap !important;
+}
+
+/* 词形还原提示 */
+.ht-bubble .ht-inflect {
+  font-size: 11px !important;
+  color: #8b93a2 !important;
+  margin: -2px 0 5px 0 !important;
+  font-style: italic !important;
+}
+
+.ht-bubble .ht-body {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.ht-bubble .ht-row {
+  display: flex !important;
+  align-items: flex-start !important;
+  gap: 7px !important;
+  margin: 2px 0 !important;
+  padding: 0 !important;
+}
+
+.ht-bubble .ht-pos {
+  flex: 0 0 auto !important;
+  display: inline-block !important;
+  min-width: 34px !important;
+  margin-top: 1px !important;
+  padding: 0 5px !important;
+  font-size: 10.5px !important;
+  line-height: 16px !important;
+  text-align: center !important;
+  color: #8fd0ff !important;
+  background: rgba(80, 160, 255, 0.15) !important;
+  border-radius: 4px !important;
+  font-style: italic !important;
+  font-weight: 500 !important;
+}
+
+.ht-bubble .ht-def {
+  flex: 1 1 auto !important;
+  color: #e8ebf0 !important;
+  word-break: break-word !important;
+}
+
+.ht-bubble .ht-err {
+  color: #ffb0a8 !important;
+}
+
+.ht-bubble .ht-loading {
+  color: #9aa3b2 !important;
+  font-size: 12px !important;
+}
+
+/* 底部来源标记 */
+.ht-bubble .ht-foot {
+  margin-top: 7px !important;
+  padding-top: 6px !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+  display: flex !important;
+  justify-content: flex-end !important;
+}
+
+.ht-bubble .ht-badge {
+  font-size: 10px !important;
+  padding: 1px 6px !important;
+  border-radius: 3px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.2px !important;
+}
+
+.ht-bubble .ht-badge-local {
+  color: #7ddba3 !important;
+  background: rgba(60, 190, 120, 0.15) !important;
+}
+
+.ht-bubble .ht-badge-online {
+  color: #c8a4ff !important;
+  background: rgba(150, 100, 255, 0.16) !important;
+}
+
+/* ===== 悬浮球 ===== */
+.ht-ball {
+  position: fixed !important;
+  right: 18px !important;
+  bottom: 96px !important;
+  z-index: 2147483600 !important;
+  width: 38px !important;
+  height: 38px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 50% !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease !important;
+}
+
+.ht-ball:hover {
+  transform: scale(1.08) !important;
+}
+
+.ht-ball:active {
+  transform: scale(0.96) !important;
+}
+
+.ht-ball-on {
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #4a8cff 0%, #6b5cff 100%) !important;
+  box-shadow: 0 3px 12px rgba(74, 140, 255, 0.42) !important;
+}
+
+.ht-ball-off {
+  color: #8a8f99 !important;
+  background: rgba(150, 155, 165, 0.26) !important;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.14) !important;
+  opacity: 0.78 !important;
+}
+
+@media (prefers-color-scheme: light) {
+  /* 气泡本身保持深色以保证在任何页面上都有高对比度 */
+  .ht-bubble {
+    background: rgba(28, 30, 36, 0.96) !important;
+  }
+}
+
+/* 打印时隐藏 */
+@media print {
+  .ht-bubble,
+  .ht-ball {
+    display: none !important;
+  }
+}
