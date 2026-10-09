@@ -34,6 +34,7 @@ t("content.js attemptTranslate 吞掉 translateWord 的 rejection",
 
 // --- 2. 后台消息契约 ---
 const bgSrc = fs.readFileSync(path.join(DIR, "background.js"), "utf8");
+const dictLookupSrc = fs.readFileSync(path.join(DIR, "dict-lookup.js"), "utf8");
 const sandbox = { console, setTimeout, clearTimeout, Promise, Map, Set, Object, Array, String, Number, Error, JSON };
 vm.createContext(sandbox);
 let handler = null;
@@ -106,6 +107,24 @@ if (loaded2 && h2) {
 const popupJs = fs.readFileSync(path.join(DIR, "popup.js"), "utf8");
 t("popup.js 对 HT_DICT_INFO 失败有降级显示", /未加载/.test(popupJs));
 t("popup.js 用 try/catch 包裹 sendMessage", /try\s*\{[\s\S]{0,400}HT_DICT_INFO/.test(popupJs));
+
+// --- 5. 在线失败重试与通道冷却（v1.2.1）---
+// 场景：国内网络下在线通道经常在 700ms 边缘抖动，之前一次失败就报
+// 「翻译服务暂时不可用」，再悬停又正常。现在内容脚本失败后静默重试一次
+// （后台放宽超时），后台另带通道冷却，避免陪不可达通道反复耗到超时。
+t("content.js 失败后静默重试一次（requestOnline 递归 + isRetry 标记）",
+  /function\s+requestOnline\s*\([^)]*isRetry[\s\S]{0,1200}requestOnline\(rawWord,\s*seq,\s*true\)/.test(contentSrc));
+t("重试请求带 extended 标记（让后台放宽超时预算）",
+  /extended:\s*isRetry\s*===\s*true/.test(contentSrc));
+t("重试期间显示「重试中」加载态而非报错", /重试中/.test(contentSrc));
+t("background 支持 extended 超时预算（RETRY_CHANNEL_TIMEOUT / RETRY_TOTAL_TIMEOUT）",
+  /RETRY_CHANNEL_TIMEOUT\s*=\s*\d+[\s\S]*?RETRY_TOTAL_TIMEOUT\s*=\s*\d+/.test(bgSrc));
+t("HT_TRANSLATE 透传 extended 标记", /extended:\s*msg\.extended\s*===\s*true/.test(bgSrc));
+t("background 有通道健康记忆（连续失败进入冷却）",
+  /channelHealth[\s\S]*cooldownUntil/.test(bgSrc) && /CHANNEL_COOLDOWN_MS\s*=\s*\d+/.test(bgSrc));
+t("通道成功时重置健康计数", /function\s+noteChannelSuccess[\s\S]{0,200}fails:\s*0/.test(bgSrc));
+t("词典拆词支持连字符合成词（lookupCompound）", /function\s+lookupCompound/.test(dictLookupSrc));
+t("拆词失败（任一段未命中）不硬凑、维持在线兜底", /if\s*\(!h\)\s*return\s*null;\s*\/\/ 任一段未命中/.test(dictLookupSrc));
 
 console.log("\n通过 " + pass + " / " + (pass + fail));
 process.exit(fail === 0 ? 0 : 1);

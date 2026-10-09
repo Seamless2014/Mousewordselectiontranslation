@@ -115,7 +115,35 @@ function lookupInDict(dict, key) {
 }
 
 /**
- * 依次尝试：原词 -> 各还原候选，返回首个命中的词条。
+ * 连字符合成词拆词查询（v1.2.1）。
+ *
+ * 词库只收纯字母词，decision-maker / real-time / mother-in-law 这类合成词
+ * 整词查不到，原实现会直接掉进在线兜底——而在线通道在国内网络下经常超时，
+ * 于是出现「有时报错、再悬停又正常」的抖动。
+ *
+ * 策略：整词含连字符且各段都能在本地查到（含词形还原）时，拆开各段
+ * 合成释义，彻底不走网络。任何一段查不到则返回 null（维持原在线兜底）。
+ *
+ * @param {function} lookupFn 传入 lookupLocal 以便递归复用（含还原逻辑）
+ * @returns {Array|null} [{ part, hit }, ...] 或 null
+ */
+function lookupCompound(word, lookupFn) {
+  const w = String(word).toLowerCase();
+  // 每段 2 个以上字母、2~4 段；过短段落（如 e-mail 的 e）不拆，避免噪音
+  if (!/^[a-z]{2,}(-[a-z]{2,}){1,3}$/.test(w)) return null;
+
+  const parts = w.split("-");
+  const hits = [];
+  for (const p of parts) {
+    const h = lookupFn(p);
+    if (!h) return null; // 任一段未命中 → 整词放弃，走在线
+    hits.push({ part: p, hit: h });
+  }
+  return hits;
+}
+
+/**
+ * 依次尝试：原词 -> 各还原候选 -> 连字符拆词，返回首个命中的词条。
  *
  * 查询顺序：精选词库 dict.js 优先（释义更精炼、词性更准），
  * 未命中再查 ECDICT 扩展词库 dict-extra.js。
@@ -151,6 +179,19 @@ function lookupLocal(rawWord) {
       if (hit) return { word: w, matched: c, entry: hit, tier: d.name, inflected: true };
     }
   }
+
+  // 最后尝试连字符拆词（如 decision-maker -> decision + maker）
+  const compound = lookupCompound(w, lookupLocal);
+  if (compound) {
+    return {
+      word: w,
+      matched: w,
+      entry: null,          // 合成词无单一条目，buildLocalResult 按 compound 组装
+      tier: compound[compound.length - 1].hit.tier,
+      inflected: false,
+      compound: compound
+    };
+  }
   return null;
 }
 
@@ -165,6 +206,27 @@ function lookupLocal(rawWord) {
  * @returns {object} 可直接用于气泡渲染的结果对象
  */
 function buildLocalResult(local) {
+  // 合成词：每段一行（段名作词性位），释义取各段前 2 条
+  if (local.compound) {
+    const groups = [];
+    for (const { part, hit } of local.compound) {
+      const defs = String(hit.entry.t || "").split(/[；;]/).map(s => s.trim()).filter(Boolean);
+      groups.push({ pos: part, text: defs.slice(0, 2).join("；") || "（无释义）" });
+    }
+    const firstPhon = local.compound.find(x => x.hit.entry.k);
+    return {
+      word: local.word,
+      matched: local.matched,
+      display: local.word,
+      phonetic: (firstPhon && firstPhon.hit.entry.k) || "",
+      inflected: false,
+      groups: groups,
+      plain: groups.map(g => g.text).join("；"),
+      source: "local",
+      tier: "compound"
+    };
+  }
+
   const entry = local.entry;
   const groups = [];
   const posList = String(entry.p || "").split("/").filter(Boolean);

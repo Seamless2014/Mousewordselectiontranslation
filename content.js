@@ -21,7 +21,7 @@
   if (window.__hoverTranslateInjected) return;
   window.__hoverTranslateInjected = true;
 
-  const HT_VERSION = "1.2.0";
+  const HT_VERSION = "1.2.1";
 
   // 后台查词的超时保护：本地查词实测 1–3 ms，200 ms 已经非常宽松。
   // 设这个上限是为了应对「service worker 正在重建」等极端情况 ——
@@ -164,11 +164,11 @@
     return el;
   }
 
-  function renderLoading(word) {
+  function renderLoading(word, text) {
     const el = ensureBubble();
     el.innerHTML =
       '<div class="ht-word">' + escapeHtml(word) + '</div>' +
-      '<div class="ht-loading">查询中…</div>';
+      '<div class="ht-loading">' + escapeHtml(text || "查询中…") + '</div>';
     positionBubble(el);
   }
 
@@ -205,8 +205,10 @@
     const channelName = { google: "Google", mymemory: "MyMemory" }[res.channel] || "";
     let badge;
     if (res.source === "local") {
-      // 区分精选词库与 ECDICT 扩展词库，便于判断释义质量来源
-      badge = res.tier === "extra" ? "本地词库 · 扩展" : "本地词库";
+      // 区分精选词库 / ECDICT 扩展词库 / 连字符合成词，便于判断释义质量来源
+      badge = res.tier === "extra" ? "本地词库 · 扩展"
+            : res.tier === "compound" ? "本地词库 · 组合"
+            : "本地词库";
     } else {
       badge = "在线翻译" + (channelName ? " · " + channelName : "");
     }
@@ -316,41 +318,54 @@
    *
    * 加载态延迟 180ms 才显示：网络快时（<180ms 返回）用户直接看到结果，
    * 不会被"查询中…"闪一下，等待感更弱。
+   *
+   * 失败自动重试（v1.2.1）：第一次用短超时（快失败），失败后不立即报错，
+   * 静默重试一次并让后台放宽超时预算（2.5s/3s）。国内网络下在线通道
+   * 经常在 700ms 边缘抖动，重试能吃掉绝大多数偶发失败——
+   * 之前「有时报错、再悬停又正常」就是这个原因。
    */
-  function requestOnline(rawWord, seq) {
+  function requestOnline(rawWord, seq, isRetry) {
     const loadingTimer = setTimeout(() => {
       if (seq !== state.reqSeq) return;
-      renderLoading(rawWord);
+      renderLoading(rawWord, isRetry ? "网络较慢，重试中…" : undefined);
       showBubble();
     }, 180);
 
     // 注意：扩展重载/更新后，旧页面残留的内容脚本调用 sendMessage 会同步抛出
     // "Extension context invalidated"。必须捕获，否则用户看到的是"完全没反应"。
     try {
-      chrome.runtime.sendMessage({ type: "HT_TRANSLATE", word: rawWord }, resp => {
-        clearTimeout(loadingTimer);
-        if (seq !== state.reqSeq) return;
-        if (chrome.runtime.lastError) {
-          renderError(rawWord, "翻译失败：扩展上下文失效，请刷新页面");
-          return;
+      chrome.runtime.sendMessage(
+        { type: "HT_TRANSLATE", word: rawWord, extended: isRetry === true },
+        resp => {
+          clearTimeout(loadingTimer);
+          if (seq !== state.reqSeq) return;
+          if (chrome.runtime.lastError) {
+            renderError(rawWord, "翻译失败：扩展上下文失效，请刷新页面");
+            return;
+          }
+          if (!resp || !resp.ok) {
+            // 第一次失败：静默重试一次（放宽超时），不打扰用户
+            if (!isRetry) {
+              requestOnline(rawWord, seq, true);
+              return;
+            }
+            renderError(rawWord, (resp && resp.error) || "在线翻译失败");
+            return;
+          }
+          const res = {
+            word: rawWord,
+            display: resp.display || rawWord,
+            phonetic: resp.phonetic || "",
+            groups: resp.groups || [],
+            plain: resp.plain || "",
+            source: "online",
+            channel: resp.source || ""   // google / mymemory，用于气泡角标显示
+          };
+          state.cache.set(rawWord.toLowerCase(), res);
+          renderResult(res);
+          showBubble();
         }
-        if (!resp || !resp.ok) {
-          renderError(rawWord, (resp && resp.error) || "在线翻译失败");
-          return;
-        }
-        const res = {
-          word: rawWord,
-          display: resp.display || rawWord,
-          phonetic: resp.phonetic || "",
-          groups: resp.groups || [],
-          plain: resp.plain || "",
-          source: "online",
-          channel: resp.source || ""   // google / mymemory，用于气泡角标显示
-        };
-        state.cache.set(rawWord.toLowerCase(), res);
-        renderResult(res);
-        showBubble();
-      });
+      );
     } catch (err) {
       clearTimeout(loadingTimer);
       renderError(rawWord, "扩展已更新，请刷新页面（F5）后使用");

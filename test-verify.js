@@ -149,6 +149,44 @@ for (const w of directCases) {
 if (directOk === directCases.length) pass++;
 else { fail++; fails.push("变体直命中用例失败 " + directOk + "/" + directCases.length); }
 
+// ---- 连字符合成词拆词（v1.2.1）----
+// 词库只收纯字母词，decision-maker 这类合成词整词查不到，原实现直接掉进
+// 在线兜底，而在线通道在国内网络经常超时（表现为"有时报错、再悬停又正常"）。
+// 拆词后各段全命中则本地合成释义，不再依赖网络。
+console.log("\n连字符合成词拆词（本地合成，不走网络）：");
+let compoundOk = 0;
+const compoundCases = [
+  // [输入, 期望段数, 期望各段至少都有释义]
+  ["decision-maker", 2], ["real-time", 2], ["well-known", 2], ["mother-in-law", 3]
+];
+for (const [w, nParts] of compoundCases) {
+  const r = lookupLocal(w);
+  const ok = !!r && !!r.compound && r.compound.length === nParts &&
+    r.compound.every(x => x.hit && x.hit.entry && String(x.hit.entry.t || "").trim());
+  const res = ok ? buildLocalResult(r) : null;
+  const shapeOk2 = res && res.tier === "compound" && res.groups.length === nParts &&
+    res.groups.every(g => g.pos && g.text);
+  if (ok && shapeOk2) compoundOk++;
+  console.log("  " + w.padEnd(16) + (ok && shapeOk2
+    ? "拆词命中 ✓  " + res.groups.map(g => g.pos + " " + g.text).join(" ｜ ")
+    : "失败 ✗"));
+}
+if (compoundOk === compoundCases.length) pass++;
+else { fail++; fails.push("合成词拆词用例失败 " + compoundOk + "/" + compoundCases.length); }
+
+// 拆词的边界：任一段未命中就放弃（保持在线兜底），不硬凑释义
+console.log("\n拆词边界（段未命中 → 维持在线兜底）：");
+let boundaryOk = 0;
+const boundaryCases = ["e-mail", "zzzz-qqq", "decision-makersx-blah"];
+for (const w of boundaryCases) {
+  const r = lookupLocal(w);
+  const ok = !r || !r.compound; // 不应产生合成结果
+  if (ok) boundaryOk++;
+  console.log("  " + w.padEnd(22) + (ok ? "未合成 ✓" : "意外合成 ✗"));
+}
+if (boundaryOk === boundaryCases.length) pass++;
+else { fail++; fails.push("拆词边界用例失败 " + boundaryOk + "/" + boundaryCases.length); }
+
 console.log("\n通过 " + pass + " / " + (pass + fail));
 console.log("\n" + (fail === 0 ? "全部通过 ✓" : "存在失败项 ✗"));
 process.exit(fail === 0 ? 0 : 1);

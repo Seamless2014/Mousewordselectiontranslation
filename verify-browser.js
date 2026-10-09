@@ -77,6 +77,7 @@ const PAGE_HTML = `<!doctype html>
 <p id="p2">She was running through the generated children of the provided data.</p>
 <p id="p3">We are implementing a comprehensive procurement strategy for depreciating assets.</p>
 <p id="p4">The analysis of indices and analyses of matrices is fundamental.</p>
+<p id="p5">Every decision-maker needs a real-time view of the mother-in-law problem.</p>
 </body></html>`;
 
 /**
@@ -192,7 +193,7 @@ function startServer() {
     ok("worker 里 buildLocalResult 可用", swProbe.hasBuildResult);
     ok("精选词库 940 条", swProbe.coreCount === 940, "实际 " + swProbe.coreCount);
     ok("扩展词库 30000 条", swProbe.extraCount === 30000, "实际 " + swProbe.extraCount);
-    ok("后台版本号 1.2.0", swProbe.version === "1.2.0", "实际 " + swProbe.version);
+    ok("后台版本号 1.2.1", swProbe.version === "1.2.1", "实际 " + swProbe.version);
 
     // ═══════════════ 第 2 步：真实查词（不经过页面，直接打消息契约） ═══════════════
     sec("第 2 步 · HT_LOOKUP / HT_DICT_INFO 消息契约（真实 runtime）");
@@ -351,16 +352,25 @@ function startServer() {
     ok("悬停 analyses（需还原）有结果", !!b4 && b4.visible, b4 ? JSON.stringify(b4.text.slice(0, 60)) : "无气泡");
     ok("analyses 显示原形 analysis", !!b4 && /analysis/.test(b4.text), b4 ? b4.text.slice(0, 80) : "无气泡");
 
+    // 连字符合成词：本地拆词命中，不该走网络（角标应为「本地词库 · 组合」）
+    const b5 = await hoverWord("#p5", "decision-maker");
+    ok("悬停 decision-maker（合成词）有结果", !!b5 && b5.visible, b5 ? JSON.stringify(b5.text.slice(0, 70)) : "无气泡");
+    ok("decision-maker 角标为「本地词库 · 组合」", !!b5 && /本地词库 · 组合/.test(b5.text),
+      b5 ? b5.text.slice(0, 90) : "无气泡");
+    ok("decision-maker 气泡含各段释义", !!b5 && /decision/.test(b5.text) && /maker/.test(b5.text));
+
     console.log(C.d("    environment 气泡： " + JSON.stringify((b1 && b1.text || "").slice(0, 90))));
     console.log(C.d("    procurement 气泡： " + JSON.stringify((b3 && b3.text || "").slice(0, 90))));
     console.log(C.d("    analyses  气泡： " + JSON.stringify((b4 && b4.text || "").slice(0, 90))));
+    console.log(C.d("    decision-maker 气泡： " + JSON.stringify((b5 && b5.text || "").slice(0, 90))));
 
     // 记录真实气泡 html 供人工核对
     results.bubbles = {
       environment: b1 ? b1.text : null,
       running: b2 ? b2.text : null,
       procurement: b3 ? b3.text : null,
-      analyses: b4 ? b4.text : null
+      analyses: b4 ? b4.text : null,
+      decisionMaker: b5 ? b5.text : null
     };
 
     // ═══════════════ 第 4 步：内存实测（CDP） ═══════════════

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "悬停取词翻译",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "鼠标悬停在英文单词上自动显示中文释义，移开自动消失。内置约 3 万词离线词库（由后台统一持有，内存不随标签页增长），支持在线兜底。",
   "permissions": ["storage", "contextMenus"],
   "host_permissions": [

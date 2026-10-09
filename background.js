@@ -17,6 +17,9 @@
  *  - 词库惰性初始化：service worker 被回收后重建时，首次查词才解析词库
  *  - 多通道并行竞速，首个成功结果立即返回，失败者被 abort，不再串行等待
  *  - 单通道超时 700ms，总超时 1000ms，超时后立即降级返回
+ *  - 连字符合成词（decision-maker 等）先在本地拆词，不必走网络
+ *  - 在线失败由内容脚本自动重试一次（超时放宽到 2.5s/3s），网络抖动不再报错
+ *  - 通道健康记忆：连续失败 ≥2 次的通道冷却 120s，重试不再陪不可达通道耗时
  *  - 后台内存缓存（LRU，上限 800 条），跨标签页/iframe 复用，命中即 0 延迟
  *  - 内容脚本侧还有一层缓存，同一单词重复悬停不再发请求
  */
@@ -28,7 +31,7 @@
 // 注意：三个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
 importScripts("dict.js", "dict-extra.js", "dict-lookup.js");
 
-const HT_BG_VERSION = "1.2.0";
+const HT_BG_VERSION = "1.2.1";
 
 // dict.js / dict-extra.js 末尾都有「仅保留纯小写字母键」的自检，
 // 这里再兜一层：确认词库真的可用，否则把查词请求直接判为未命中（走在线兜底）。
@@ -37,11 +40,34 @@ const DICT_READY =
   (typeof DICT_EXTRA === "object" && !!DICT_EXTRA);
 
 // ---------- 超时与缓存配置 ----------
-const CHANNEL_TIMEOUT = 700;    // 单通道超时（毫秒）
-const TOTAL_TIMEOUT = 1000;     // 整体超时（毫秒），到点即返回，不阻塞用户
-const CACHE_MAX = 800;          // 后台缓存上限（条）
+const CHANNEL_TIMEOUT = 700;       // 常规单通道超时（毫秒）
+const TOTAL_TIMEOUT = 1000;        // 常规整体超时（毫秒），到点即返回，不阻塞用户
+const RETRY_CHANNEL_TIMEOUT = 2500; // 重试单通道超时：网络抖动时给足余量
+const RETRY_TOTAL_TIMEOUT = 3000;   // 重试整体超时
+const CACHE_MAX = 800;             // 后台缓存上限（条）
+const CHANNEL_COOLDOWN_MS = 120000; // 通道连续失败后的冷却时长（毫秒）
 
 const cache = new Map();        // word -> { ok, display, phonetic, plain, groups }
+
+// 通道健康记忆：连续失败 ≥2 次的通道冷却一段时间，避免每次请求都陪它耗到超时。
+// 典型场景：国内网络下 Google 端点不可达，若不冷却，每次重试都要白等一轮。
+const channelHealth = {};       // name -> { fails: n, cooldownUntil: ts }
+
+function noteChannelSuccess(name) {
+  channelHealth[name] = { fails: 0, cooldownUntil: 0 };
+}
+
+function noteChannelFailure(name) {
+  const h = channelHealth[name] || { fails: 0, cooldownUntil: 0 };
+  h.fails += 1;
+  if (h.fails >= 2) h.cooldownUntil = Date.now() + CHANNEL_COOLDOWN_MS;
+  channelHealth[name] = h;
+}
+
+function isChannelCoolingDown(name) {
+  const h = channelHealth[name];
+  return !!(h && h.fails >= 2 && Date.now() < h.cooldownUntil);
+}
 
 function cacheGet(word) {
   const k = word.toLowerCase();
@@ -162,12 +188,21 @@ function normalizePos(raw) {
 /**
  * 并行竞速：所有通道同时发起，首个成功的结果立即返回。
  * 相比原来的「主通道失败再试备用」串行策略，最坏耗时从 8s+8s 降到 1.1s。
+ *
+ * @param {string} word 要翻译的词
+ * @param {object} budget { channel, total } 超时预算；缺省用常规值
  */
-function raceChannels(word) {
+function raceChannels(word, budget) {
+  const channelTimeout = (budget && budget.channel) || CHANNEL_TIMEOUT;
+  const totalTimeout = (budget && budget.total) || TOTAL_TIMEOUT;
   const channels = [
     { name: "Google", run: sig => fetchGoogle(word, sig) },
     { name: "MyMemory", run: sig => fetchMyMemory(word, sig) }
   ];
+
+  // 健康通道优先；全部处于冷却时则照常尝试（有结果总比没有强）
+  let active = channels.filter(ch => !isChannelCoolingDown(ch.name));
+  if (!active.length) active = channels;
 
   return new Promise(resolve => {
     let settled = false;
@@ -186,21 +221,25 @@ function raceChannels(word) {
       const detail = errors.length ? "（" + errors.join(" / ") + "）" : "";
       finish({
         ok: false,
-        error: "翻译服务响应超时，已超过 " + TOTAL_TIMEOUT + "ms" + detail
+        error: "翻译服务响应超时，已超过 " + totalTimeout + "ms" + detail
       });
-    }, TOTAL_TIMEOUT);
+    }, totalTimeout);
 
-    channels.forEach(ch => {
-      withTimeout(ch.run, CHANNEL_TIMEOUT, ch.name)
+    active.forEach(ch => {
+      withTimeout(ch.run, channelTimeout, ch.name)
         .then(res => {
-          if (res && res.ok) finish(res);
+          if (res && res.ok) {
+            noteChannelSuccess(ch.name);
+            finish(res);
+          }
         })
         .catch(e => {
+          noteChannelFailure(ch.name);
           // 错误信息带通道名前缀，便于排查是哪条通道失败
           errors.push(ch.name + ": " + (e && e.message ? e.message : String(e)));
           failed++;
-          // 全部通道都失败：立即返回错误，不必等总超时
-          if (failed === channels.length) {
+          // 参与本轮的通道都失败：立即返回错误，不必等总超时
+          if (failed === active.length) {
             finish({ ok: false, error: "翻译服务暂时不可用（" + errors.join(" / ") + "）" });
           }
         });
@@ -208,11 +247,19 @@ function raceChannels(word) {
   });
 }
 
-async function translate(word) {
+/**
+ * 在线翻译。opts.extended 为 true 时使用放宽的超时预算——
+ * 这是内容脚本失败重试时传的标记：第一次用短超时快速失败，
+ * 重试用长超时兜住网络抖动，避免动辄报「暂时不可用」。
+ */
+async function translate(word, opts) {
   const hit = cacheGet(word);
   if (hit) return hit;
 
-  const res = await raceChannels(word);
+  const budget = (opts && opts.extended)
+    ? { channel: RETRY_CHANNEL_TIMEOUT, total: RETRY_TOTAL_TIMEOUT }
+    : null;
+  const res = await raceChannels(word, budget);
   // 仅缓存成功结果，避免把临时失败固化
   if (res && res.ok) cacheSet(word, res);
   return res;
@@ -266,7 +313,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "HT_TRANSLATE") {
-    translate(String(msg.word || "").trim())
+    translate(String(msg.word || "").trim(), { extended: msg.extended === true })
       .then(sendResponse)
       .catch(e => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true; // 异步响应

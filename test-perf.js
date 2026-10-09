@@ -91,6 +91,9 @@ const api = {
   cacheGet: workerSandbox.cacheGet,
   cacheSet: workerSandbox.cacheSet,
   lookupOffline: workerSandbox.lookupOffline,
+  noteChannelSuccess: workerSandbox.noteChannelSuccess,
+  noteChannelFailure: workerSandbox.noteChannelFailure,
+  isChannelCoolingDown: workerSandbox.isChannelCoolingDown,
   CHANNEL_TIMEOUT: vm.runInContext("CHANNEL_TIMEOUT", workerSandbox),
   TOTAL_TIMEOUT: vm.runInContext("TOTAL_TIMEOUT", workerSandbox),
 };
@@ -129,6 +132,10 @@ function mmPlan(delay, ok = true) {
   console.log("=".repeat(58));
   console.log("单通道超时 " + api.CHANNEL_TIMEOUT + "ms / 总超时 " + api.TOTAL_TIMEOUT + "ms\n");
 
+  // 干净起点：清掉通道健康状态，避免用例间相互污染
+  api.noteChannelSuccess("Google");
+  api.noteChannelSuccess("MyMemory");
+
   // ---- 1. 快通道 ----
   fetchPlan = [googlePlan(50), mmPlan(60)];
   fetchCallCount = 0;
@@ -161,13 +168,53 @@ function mmPlan(delay, ok = true) {
   check("场景3 双慢：明显快于旧实现 8s+", dt < 2000);
 
   // ---- 4. 双通道都报错 → 立即返回 ----
+  // 注意：场景2（Google 超时）+ 场景3（双双超时）已让 Google 连续失败 2 次
+  // 进入冷却，本场景只会请求 MyMemory —— 冷却机制在后续场景 4b 显式验证。
   fetchPlan = [googlePlan(50, false), mmPlan(50, false)];
   t0 = Date.now();
   r = await api.translate("allfail");
   dt = Date.now() - t0;
   check("场景4 双失败：返回失败", r && r.ok === false);
   check("场景4 双失败：立即返回（<300ms，实测 " + dt + "ms）", dt < 300);
-  check("场景4 双失败：错误信息含两个通道", /Google/.test(r.error) && /MyMemory/.test(r.error), r.error);
+  check("场景4 双失败：Google 已因连续失败进入冷却",
+    api.isChannelCoolingDown("Google") === true);
+  check("场景4 双失败：错误信息含参与通道（MyMemory）",
+    /MyMemory/.test(r.error), r.error);
+
+  // ---- 4b. 通道冷却：连续失败 ≥2 次的通道被跳过 ----
+  // 真实场景对应：国内网络下 Google 端点不可达，不应每次都陪它耗到超时。
+  // 场景4 结束时 Google/MyMemory 都已连续失败 2 次；这里恢复 MyMemory，
+  // 只留 Google 在冷却，验证「有健康通道时跳过冷却通道」。
+  api.noteChannelSuccess("MyMemory");
+  fetchPlan = [googlePlan(30), mmPlan(60)];   // 若请求 Google 本可快速成功
+  fetchCallCount = 0;
+  r = await api.translate("cooling-skip");
+  check("场景4b 冷却：失败通道被跳过（只发起 1 个请求）", fetchCallCount === 1,
+    "实际 " + fetchCallCount);
+  check("场景4b 冷却：仍能靠健康通道成功", r && r.ok === true && r.source === "mymemory",
+    "source=" + (r && r.source));
+
+  // ---- 4b-2. 全部冷却时兜底：照常尝试所有通道（有结果总比没有强）----
+  // MyMemory 在 4b 成功过（计数已清零），需要再累计 2 次失败才进冷却
+  api.noteChannelFailure("MyMemory");
+  api.noteChannelFailure("MyMemory");
+  fetchPlan = [googlePlan(30), mmPlan(60)];
+  fetchCallCount = 0;
+  r = await api.translate("all-cooling");
+  check("场景4b-2 全冷却：兜底仍发起全部通道（2 个请求）", fetchCallCount === 2,
+    "实际 " + fetchCallCount);
+  check("场景4b-2 全冷却：快速成功的通道返回结果", r && r.ok === true,
+    "source=" + (r && r.source));
+
+  // ---- 4c. 冷却恢复：通道成功后重置健康计数 ----
+  api.noteChannelSuccess("Google");
+  api.noteChannelSuccess("MyMemory");
+  fetchPlan = [googlePlan(30), mmPlan(60)];
+  fetchCallCount = 0;
+  r = await api.translate("cooling-recover");
+  check("场景4c 恢复：健康计数重置后两通道并行（2 个请求）", fetchCallCount === 2,
+    "实际 " + fetchCallCount);
+  check("场景4c 恢复：竞速取最快结果", r && r.ok === true, JSON.stringify(r).slice(0, 60));
 
   // ---- 5. 缓存 ----
   fetchPlan = [googlePlan(50), mmPlan(60)];
