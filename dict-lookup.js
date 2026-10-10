@@ -9,6 +9,7 @@
  * 依赖（由调用方保证已先加载，顺序不得颠倒）：
  *   dict.js        -> var LOCAL_DICT
  *   dict-extra.js  -> var DICT_EXTRA
+ *   dict-phrase.js -> var DICT_PHRASE（可选，缺失时词组查询自动降级）
  *
  * 本文件不持有词库引用，只在查询时按名读取，因此：
  *   - 词库缺失时降级返回 null，不抛错
@@ -143,6 +144,67 @@ function lookupCompound(word, lookupFn) {
 }
 
 /**
+ * 规范化词组键：小写、去首尾空白、内部多空格压成单空格。
+ *
+ * 必须做这层规范化的原因：从 DOM 取到的文本可能含连续空格、换行、
+ * 或 `&nbsp;` 转成的 \u00a0，直接查表会全部落空。
+ *
+ * @returns {string} 规范化后的词组键（可能为空串）
+ */
+function normalizePhrase(s) {
+  return String(s == null ? "" : s)
+    .replace(/[\u00a0\u2000-\u200b\u3000]/g, " ") // 各类不换行/全角空格
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * 词组查询（v1.3.0）。
+ *
+ * 词库分三份：精选单词 / 扩展单词 / 词组。词组键含空格，形状与单词互斥，
+ * 但查询顺序上仍放在单词之后——因为单词查询更快且命中率更高，
+ * 且「选中一个词」比「选中一个词组」更常见。
+ *
+ * 变体尝试顺序：
+ *   1. 原样词组（"look forward to"）
+ *   2. 去尾部标点（"look forward to." → "look forward to"）
+ *   3. 去掉首尾冠词（"a bit of" → "bit of"，当用户多选了冠词）
+ *
+ * @param {string} rawPhrase 原始文本
+ * @returns {object|null} 与 lookupLocal 同构：{ word, matched, entry, tier, phrase:true }
+ */
+function lookupPhrase(rawPhrase) {
+  if (typeof DICT_PHRASE === "undefined" || !DICT_PHRASE) return null;
+
+  let key = normalizePhrase(rawPhrase);
+  if (!key || key.length < 3 || key.length > 60) return null;
+  // 必须是「纯字母 + 单空格」，排除含数字/标点的文本
+  if (!/^[a-z]+(?: [a-z]+)*$/.test(key)) {
+    // 宽容处理：剥掉尾部标点后再试一次（"look forward to," 这类）
+    key = key.replace(/[^a-z\s]+$/g, "").replace(/\s+/g, " ").trim();
+    if (!/^[a-z]+(?: [a-z]+)*$/.test(key)) return null;
+  }
+
+  const tryKey = k => {
+    const hit = lookupInDict(DICT_PHRASE, k);
+    return hit ? { word: key, matched: k, entry: hit, tier: "phrase", phrase: true, inflected: false } : null;
+  };
+
+  let r = tryKey(key);
+  if (r) return r;
+
+  // 去掉首部冠词再试（用户可能多选了 "a" / "the"）
+  const parts = key.split(" ");
+  if (parts.length > 2 && (parts[0] === "a" || parts[0] === "the" || parts[0] === "an")) {
+    r = tryKey(parts.slice(1).join(" "));
+    if (r) return r;
+  }
+  return null;
+}
+
+/**
  * 依次尝试：原词 -> 各还原候选 -> 连字符拆词，返回首个命中的词条。
  *
  * 查询顺序：精选词库 dict.js 优先（释义更精炼、词性更准），
@@ -155,9 +217,16 @@ function lookupLocal(rawWord) {
   // 两个词库都缺失时降级为纯在线模式，不让异常中断取词流程
   const hasMain = typeof LOCAL_DICT === "undefined" ? false : !!LOCAL_DICT;
   const hasExtra = typeof DICT_EXTRA === "undefined" ? false : !!DICT_EXTRA;
-  if (!hasMain && !hasExtra) return null;
+  const hasPhrase = typeof DICT_PHRASE === "undefined" ? false : !!DICT_PHRASE;
+  if (!hasMain && !hasExtra && !hasPhrase) return null;
 
   const w = String(rawWord).toLowerCase();
+
+  // 含空格 → 只可能是词组查询，直接走词组分支，省掉无谓的单词查表
+  if (w.indexOf(" ") >= 0 || w.indexOf("\u00a0") >= 0) {
+    return hasPhrase ? lookupPhrase(w) : null;
+  }
+
   const dicts = [];
   if (hasMain) dicts.push({ name: "core", dict: LOCAL_DICT });
   if (hasExtra) dicts.push({ name: "extra", dict: DICT_EXTRA });
@@ -247,13 +316,13 @@ function buildLocalResult(local) {
     word: local.word,
     matched: local.matched,
     display: local.word,
-    // 扩展词库带 k（音标）；精选词库 dict.js 通常没有该字段
+    // 扩展词库带 k（音标）；精选词库与词组词库通常没有该字段
     phonetic: entry.k || "",
     inflected: !!local.inflected,
     groups: groups,
     plain: entry.t,
     source: "local",
-    // 标记词条来源，气泡角标区分"精选词库 / 扩展词库"
+    // 标记词条来源，气泡角标区分「精选词库 / 扩展词库 / 词组」
     tier: local.tier || (entry.k !== undefined ? "extra" : "core")
   };
 }

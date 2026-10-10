@@ -78,6 +78,9 @@ const PAGE_HTML = `<!doctype html>
 <p id="p3">We are implementing a comprehensive procurement strategy for depreciating assets.</p>
 <p id="p4">The analysis of indices and analyses of matrices is fundamental.</p>
 <p id="p5">Every decision-maker needs a real-time view of the mother-in-law problem.</p>
+<p id="p6">We should insofar as possible abide by the rules and figure out the cost.</p>
+<p id="p7">Out of the blue, she agreed to a variety of terms in the long run.</p>
+<p id="p8">The system will be able to take advantage of the natural language model.</p>
 </body></html>`;
 
 /**
@@ -108,7 +111,7 @@ function startServer() {
   const SKIP_MEM = process.argv.includes("--no-memory");
 
   console.log(C.b("\n════════════════════════════════════════════════════════════"));
-  console.log(C.b(" hover-translate v1.2.0 真实 Chromium 验收"));
+  console.log(C.b(" hover-translate v1.3.0 真实 Chromium 验收"));
   console.log(C.b("════════════════════════════════════════════════════════════"));
   console.log(C.d("  Chromium : " + CHROMIUM));
   console.log(C.d("  扩展目录 : " + EXT_DIR));
@@ -180,20 +183,26 @@ function startServer() {
     const swProbe = await sw.evaluate(() => ({
       hasLocalDict: typeof LOCAL_DICT === "object" && !!LOCAL_DICT,
       hasDictExtra: typeof DICT_EXTRA === "object" && !!DICT_EXTRA,
+      hasDictPhrase: typeof DICT_PHRASE === "object" && !!DICT_PHRASE,
       hasLookupLocal: typeof lookupLocal === "function",
+      hasLookupPhrase: typeof lookupPhrase === "function",
       hasBuildResult: typeof buildLocalResult === "function",
       coreCount: typeof LOCAL_DICT === "object" && LOCAL_DICT ? Object.keys(LOCAL_DICT).length : 0,
       extraCount: typeof DICT_EXTRA === "object" && DICT_EXTRA ? Object.keys(DICT_EXTRA).length : 0,
+      phraseCount: typeof DICT_PHRASE === "object" && DICT_PHRASE ? Object.keys(DICT_PHRASE).length : 0,
       version: typeof HT_BG_VERSION === "string" ? HT_BG_VERSION : null
     }));
 
     ok("worker 里 LOCAL_DICT 已装配", swProbe.hasLocalDict, swProbe.coreCount + " 条");
     ok("worker 里 DICT_EXTRA 已装配", swProbe.hasDictExtra, swProbe.extraCount + " 条");
+    ok("worker 里 DICT_PHRASE 已装配", swProbe.hasDictPhrase, swProbe.phraseCount + " 条");
     ok("worker 里 lookupLocal 可用", swProbe.hasLookupLocal);
+    ok("worker 里 lookupPhrase 可用", swProbe.hasLookupPhrase);
     ok("worker 里 buildLocalResult 可用", swProbe.hasBuildResult);
     ok("精选词库 940 条", swProbe.coreCount === 940, "实际 " + swProbe.coreCount);
     ok("扩展词库 30000 条", swProbe.extraCount === 30000, "实际 " + swProbe.extraCount);
-    ok("后台版本号 1.2.1", swProbe.version === "1.2.1", "实际 " + swProbe.version);
+    ok("词组词库 ≥ 8.5 万条", swProbe.phraseCount >= 85000, "实际 " + swProbe.phraseCount);
+    ok("后台版本号 1.3.0", swProbe.version === "1.3.0", "实际 " + swProbe.version);
 
     // ═══════════════ 第 2 步：真实查词（不经过页面，直接打消息契约） ═══════════════
     sec("第 2 步 · HT_LOOKUP / HT_DICT_INFO 消息契约（真实 runtime）");
@@ -204,11 +213,18 @@ function startServer() {
       // 故用 sendMessage 到自己的方式不可靠，这里改为直接调用内部函数暴露的等价逻辑。
       resolve({
         core: Object.keys(LOCAL_DICT).length,
-        extra: Object.keys(DICT_EXTRA).length
+        extra: Object.keys(DICT_EXTRA).length,
+        phrase: Object.keys(DICT_PHRASE).length
       });
     }));
-    ok("HT_DICT_INFO 数据源正确", dictInfo.core === 940 && dictInfo.extra === 30000,
-      dictInfo.core + " + " + dictInfo.extra);
+    // v1.3.0：HT_DICT_INFO 分层改为 words(core+extra) + phrase(total)
+    ok("HT_DICT_INFO 数据源正确",
+      dictInfo.core === swProbe.coreCount &&
+      dictInfo.extra === swProbe.extraCount &&
+      dictInfo.phrase === swProbe.phraseCount,
+      dictInfo.core + " + " + dictInfo.extra + " + " + dictInfo.phrase);
+    ok("HT_DICT_INFO 无重复计数（词组与单词不重叠）",
+      dictInfo.phrase > 0 && dictInfo.phrase < dictInfo.core + dictInfo.extra + dictInfo.phrase);
 
     // 真实查词：直接在 worker 里跑 lookupLocal，验证真实 V8 环境下的结果
     const lookups = await sw.evaluate(() => {
@@ -239,6 +255,67 @@ function startServer() {
     ok("analyses → analysis 词形还原", byWord.analyses.found && byWord.analyses.inflected && byWord.analyses.matched === "analysis");
     ok("zzzzqqq 未收录，返回 found:false", !byWord.zzzzqqq.found);
     ok("结果带 source=local", byWord.environment.found && byWord.environment.source === "local");
+
+    // ── 真实 V8 环境下的词组查询（v1.3.0 新增） ──
+    //
+    // 这里直接打 lookupOffline 的等价路径：先试 core 单词，再按候选由短到长试词组，
+    // 最后回落 extra 单词。断言覆盖三种结局，正是分层优先的核心契约。
+    const phraseLk = await sw.evaluate(() => {
+      const run = (word, phrases) => {
+        // 与 background.js lookupOffline 的分层顺序保持一致
+        const w = word ? String(word).toLowerCase() : "";
+        const wordHit = w ? lookupLocal(w) : null;
+        if (wordHit && wordHit.tier === "core") {
+          const r = buildLocalResult(wordHit);
+          return { via: "core-word", tier: r.tier, display: r.display, matched: r.matched, plain: r.plain };
+        }
+        const list = Array.isArray(phrases) ? phrases : [];
+        for (const p of list) {
+          const s = String(p || "");
+          if (s.indexOf(" ") < 0) continue;
+          const hit = lookupLocal(s);
+          if (hit) {
+            const r = buildLocalResult(hit);
+            return { via: "phrase", tier: r.tier, display: r.display, matched: r.matched, plain: r.plain };
+          }
+        }
+        if (wordHit) {
+          const r = buildLocalResult(wordHit);
+          return { via: "extra-word", tier: r.tier, display: r.display, matched: r.matched, plain: r.plain };
+        }
+        return { via: "miss" };
+      };
+
+      return {
+        // core 单词胜出：account 本就在精选库里，不该被 "account for" 抢走
+        coreWins: run("account", ["account for"]),
+        // extra 单词让位词组：figure 在扩展库，但 "figure out" 是更准的释义
+        phraseBeatsExtra: run("figure", ["figure out", "out"]),
+        // extra 单词 + 无对应词组 → 正常回落 extra
+        extraFallback: run("procurement", ["procurement process zzz", "zzz procurement"]),
+        // 词组命中：由短到长，out of（2 词）先于 out of the blue（4 词）
+        shortFirst: run("blue", ["out of", "out of the blue", "of the blue"]),
+        // 未收录
+        missAll: run("zzzzqqq", ["zzzzqqq zzzzqqq"])
+      };
+    });
+
+    ok("词组查询链路已装配（真实 SW）", !!phraseLk && typeof phraseLk.coreWins === "object",
+      phraseLk ? JSON.stringify(phraseLk.shortFirst) : "不可读");
+    ok("分层优先 · core 单词胜出词组",
+      phraseLk.coreWins.via === "core-word" && phraseLk.coreWins.tier === "core",
+      JSON.stringify(phraseLk.coreWins));
+    ok("分层优先 · extra 单词让位词组（figure → figure out）",
+      phraseLk.phraseBeatsExtra.via === "phrase" && phraseLk.phraseBeatsExtra.tier === "phrase" &&
+      /[\u4e00-\u9fa5]/.test(phraseLk.phraseBeatsExtra.plain || ""),
+      JSON.stringify(phraseLk.phraseBeatsExtra));
+    ok("分层优先 · 词组未命中回落 extra 单词",
+      phraseLk.extraFallback.via === "extra-word" && phraseLk.extraFallback.tier === "extra",
+      JSON.stringify(phraseLk.extraFallback));
+    ok("词组候选由短到长（out of 先于 out of the blue）",
+      phraseLk.shortFirst.via === "phrase" && phraseLk.shortFirst.matched === "out of",
+      JSON.stringify(phraseLk.shortFirst));
+    ok("全未收录时返回 miss", phraseLk.missAll.via === "miss");
 
     // ═══════════════ 第 3 步：真实页面里悬停取词（端到端） ═══════════════
     sec("第 3 步 · 真实页面悬停取词（content script 全链路）");
@@ -355,14 +432,97 @@ function startServer() {
     // 连字符合成词：本地拆词命中，不该走网络（角标应为「本地词库 · 组合」）
     const b5 = await hoverWord("#p5", "decision-maker");
     ok("悬停 decision-maker（合成词）有结果", !!b5 && b5.visible, b5 ? JSON.stringify(b5.text.slice(0, 70)) : "无气泡");
-    ok("decision-maker 角标为「本地词库 · 组合」", !!b5 && /本地词库 · 组合/.test(b5.text),
+    ok("决策词 decision-maker 角标为「本地词库 · 组合」", !!b5 && /本地词库 · 组合/.test(b5.text),
       b5 ? b5.text.slice(0, 90) : "无气泡");
     ok("decision-maker 气泡含各段释义", !!b5 && /decision/.test(b5.text) && /maker/.test(b5.text));
+
+    // ── 第 3b 步：真实页面里的**词组**悬停（v1.3.0 新增） ──
+    //
+    // 必须让光标**停在某个单词的字母上**（content.js 的 wordAtPoint 由 caretRangeFromPoint
+    // 拿到的 node+offset 决定起点），offset 要落在字母上，否则会命中前一个词。
+    // 悬停前先按 Esc 清掉上一个气泡，避免「已在显示」去重逻辑误判。
+    sec("第 3b 步 · 真实页面悬停词组（分层优先端到端）");
+
+    async function hoverPhraseWord(sel, phrase, wordIndex) {
+      // 先清掉可能残留的气泡，避免 content.js 的去重键把这次悬停当成「重复」
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(150);
+
+      const box = await page.evaluate(({ sel, phrase, wordIndex }) => {
+        const el = document.querySelector(sel);
+        const node = el.firstChild;
+        const text = node.textContent;
+        const idx = text.indexOf(phrase);
+        if (idx < 0) return null;
+        // 找到 phrase 里第 wordIndex 个单词的起始字符位置
+        const parts = phrase.split(" ");
+        let off = 0;
+        for (let i = 0; i < wordIndex; i++) off += parts[i].length + 1;
+        const start = idx + off;
+        // ★ offset 必须落在字母上：x 取第 start+1 个字符（字母内部），而不是 start（词边界）
+        const target = Math.min(start + 1, idx + phrase.length - 1);
+        const r = document.createRange();
+        r.setStart(node, target);
+        r.setEnd(node, target + 1);
+        const rect = r.getBoundingClientRect();
+        return { x: rect.left + Math.max(1, rect.width / 2), y: rect.top + rect.height / 2 };
+      }, { sel, phrase, wordIndex });
+      if (!box) return null;
+
+      await page.mouse.move(box.x - 60, box.y, { steps: 5 });
+      await page.waitForTimeout(60);
+      await page.mouse.move(box.x, box.y, { steps: 8 });
+      await page.waitForTimeout(900);
+      return page.evaluate(() => {
+        const b = document.querySelector(".ht-bubble");
+        if (!b) return null;
+        const style = getComputedStyle(b);
+        return {
+          text: (b.textContent || "").trim(),
+          visible: style.display !== "none" && style.visibility !== "hidden" && parseFloat(style.opacity || "1") > 0
+        };
+      });
+    }
+
+    // p6：insofar as —— 悬停 insofar，应命中词组（而不是丢给在线通道）
+    // 注意：悬停的是 insofar，但回调会选候选里**最短**的 2 词组合 insofar as
+    const c1 = await hoverPhraseWord("#p6", "insofar as", 0);
+    ok("悬停 insofar 有结果", !!c1 && c1.visible, c1 ? JSON.stringify(c1.text.slice(0, 80)) : "无气泡");
+    ok("insofar 角标为「本地词库 · 词组」", !!c1 && /本地词库 · 词组/.test(c1.text),
+      c1 ? c1.text.slice(0, 90) : "无气泡");
+
+    // p6：figure out —— 悬停 figure（extra 单词），应让位给词组
+    const c2 = await hoverPhraseWord("#p6", "figure out", 0);
+    ok("悬停 figure（词组中）有结果", !!c2 && c2.visible, c2 ? JSON.stringify(c2.text.slice(0, 80)) : "无气泡");
+    ok("extra 单词 figure 让位词组（角标为词组）", !!c2 && /本地词库 · 词组/.test(c2.text),
+      c2 ? c2.text.slice(0, 90) : "无气泡");
+
+    // p7：a variety of —— 悬停 variety
+    const c3 = await hoverPhraseWord("#p7", "a variety of", 1);
+    ok("悬停 variety（a variety of）有结果", !!c3 && c3.visible, c3 ? JSON.stringify(c3.text.slice(0, 80)) : "无气泡");
+    ok("variety 角标为「本地词库 · 词组」", !!c3 && /本地词库 · 词组/.test(c3.text),
+      c3 ? c3.text.slice(0, 90) : "无气泡");
+
+    // p7：in the long run —— 悬停 long（本身是 core 单词），应**胜出**，不显示词组角标
+    const c4 = await hoverPhraseWord("#p7", "in the long run", 2);
+    ok("悬停 long（core 单词）有结果", !!c4 && c4.visible, c4 ? JSON.stringify(c4.text.slice(0, 80)) : "无气泡");
+    ok("core 单词 long 胜出词组（不显示词组角标）",
+      !!c4 && !/本地词库 · 词组/.test(c4.text), c4 ? c4.text.slice(0, 90) : "无气泡");
+
+    // p8：take advantage of —— 悬停 advantage（extra 单词）
+    const c5 = await hoverPhraseWord("#p8", "take advantage of", 1);
+    ok("悬停 advantage（词组中）有结果", !!c5 && c5.visible, c5 ? JSON.stringify(c5.text.slice(0, 80)) : "无气泡");
+    ok("advantage 在词组语境下让位词组",
+      !!c5 && /本地词库 · 词组/.test(c5.text), c5 ? c5.text.slice(0, 90) : "无气泡");
 
     console.log(C.d("    environment 气泡： " + JSON.stringify((b1 && b1.text || "").slice(0, 90))));
     console.log(C.d("    procurement 气泡： " + JSON.stringify((b3 && b3.text || "").slice(0, 90))));
     console.log(C.d("    analyses  气泡： " + JSON.stringify((b4 && b4.text || "").slice(0, 90))));
     console.log(C.d("    decision-maker 气泡： " + JSON.stringify((b5 && b5.text || "").slice(0, 90))));
+    console.log(C.d("    insofar-as 气泡： " + JSON.stringify((c1 && c1.text || "").slice(0, 90))));
+    console.log(C.d("    figure-out 气泡： " + JSON.stringify((c2 && c2.text || "").slice(0, 90))));
+    console.log(C.d("    a-variety-of 气泡： " + JSON.stringify((c3 && c3.text || "").slice(0, 90))));
+    console.log(C.d("    in-the-long-run 气泡： " + JSON.stringify((c4 && c4.text || "").slice(0, 90))));
 
     // 记录真实气泡 html 供人工核对
     results.bubbles = {
@@ -370,7 +530,12 @@ function startServer() {
       running: b2 ? b2.text : null,
       procurement: b3 ? b3.text : null,
       analyses: b4 ? b4.text : null,
-      decisionMaker: b5 ? b5.text : null
+      decisionMaker: b5 ? b5.text : null,
+      insofarAs: c1 ? c1.text : null,
+      figureOut: c2 ? c2.text : null,
+      aVarietyOf: c3 ? c3.text : null,
+      inTheLongRun: c4 ? c4.text : null,
+      takeAdvantageOf: c5 ? c5.text : null
     };
 
     // ═══════════════ 第 4 步：内存实测（CDP） ═══════════════
@@ -456,7 +621,7 @@ function startServer() {
 
       // 词库理论大小的字符量（用于对照）
       const dictChars = await sw.evaluate(() => {
-        let chars = 0;
+        let chars = 0, phraseChars = 0;
         const count = (d) => {
           for (const k in d) {
             if (!Object.prototype.hasOwnProperty.call(d, k)) continue;
@@ -470,7 +635,16 @@ function startServer() {
         };
         if (typeof LOCAL_DICT === "object" && LOCAL_DICT) count(LOCAL_DICT);
         if (typeof DICT_EXTRA === "object" && DICT_EXTRA) count(DICT_EXTRA);
-        return chars;
+        // 词组库是扁平结构 { 词组: { t: 释义 } }
+        if (typeof DICT_PHRASE === "object" && DICT_PHRASE) {
+          for (const k in DICT_PHRASE) {
+            if (!Object.prototype.hasOwnProperty.call(DICT_PHRASE, k)) continue;
+            phraseChars += k.length;
+            const v = DICT_PHRASE[k];
+            if (v) phraseChars += String(v.t || "").length;
+          }
+        }
+        return chars + phraseChars;
       }).catch(() => null);
 
       console.log("");
@@ -486,18 +660,18 @@ function startServer() {
         console.log("  SW 堆增幅     : " + (swGrowth >= 0 ? "+" : "") + swGrowth.toFixed(1) + "%");
         console.log("");
         console.log(C.d("  ▶ 方案 B 的论点是：词库只有 SW 里一份，网页侧不再各自持有。"));
-        console.log(C.d("    · SW 堆应基本恒定（词库 8.8 MB 已经算进去了），不随标签页线性增长；"));
-        console.log(C.d("    · 网页堆应远小于 8.8 MB —— 这正是省下来的部分。"));
+        console.log(C.d("    · SW 堆应基本恒定（词库 ~33.8 MB 已经算进去了），不随标签页线性增长；"));
+        console.log(C.d("    · 网页堆应远小于词库体积 —— 这正是省下来的部分。"));
 
         // SW 堆增长 < 30% 视为通过
         ok("SW 堆不随标签页数线性增长（增幅 < 30%）", swGrowth < 30,
           "实测 " + (swGrowth >= 0 ? "+" : "") + swGrowth.toFixed(1) + "%");
 
-        // ★ 网页堆必须明显小于词库体积（8.8 MB）——这是方案 B 最硬的证据
+        // ★ 网页堆必须明显小于词库体积 —— 这是方案 B 最硬的证据
         if (finalPage != null) {
           const PAGE_LIMIT = 4.0 * 1024 * 1024; // 4 MB，给 content.js 本体留余量
           ok("单个网页堆远小于词库体积（< 4 MB，即未持有词库副本）", finalPage < PAGE_LIMIT,
-            "实测 " + mb(finalPage) + "，词库单份约 8.8 MB");
+            "实测 " + mb(finalPage) + "，词库单份约 33.8 MB");
           results.memory = {
             baseSw, finalSw, swGrowthPct: swGrowth,
             basePage, finalPage,
@@ -537,7 +711,8 @@ function startServer() {
     sec("验收汇总");
     console.log("  扩展 ID      : " + extId);
     console.log("  SW 词库装配  : 精选 " + swProbe.coreCount + " + 扩展 " + swProbe.extraCount +
-      " = " + (swProbe.coreCount + swProbe.extraCount) + " 条");
+      " + 词组 " + swProbe.phraseCount +
+      " = " + (swProbe.coreCount + swProbe.extraCount + swProbe.phraseCount) + " 条");
     if (results.memory && results.memory.baseSw != null && results.memory.finalSw != null) {
       const m = results.memory;
       console.log("  内存实测     : SW 堆 " + mb(m.baseSw) + " → " + mb(m.finalSw) +
@@ -560,7 +735,9 @@ function startServer() {
       chromium: CHROMIUM,
       extId,
       swProbe,
+      dictInfo,
       lookups,
+      phraseLk,
       pass,
       fail,
       failures,

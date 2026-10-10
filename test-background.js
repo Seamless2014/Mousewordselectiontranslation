@@ -56,7 +56,7 @@ function createWorker(opts) {
     const names = Array.prototype.slice.call(arguments);
     names.forEach(n => {
       importCalls.push(n);
-      if (!o.withDict && (n === "dict.js" || n === "dict-extra.js")) {
+      if (!o.withDict && (n === "dict.js" || n === "dict-extra.js" || n === "dict-phrase.js")) {
         return; // 模拟词库文件缺失
       }
       const p = path.join(DIR, n);
@@ -156,16 +156,18 @@ function countDict(file, varName) {
 }
 const realCore = countDict("dict.js", "LOCAL_DICT");
 const realExtra = countDict("dict-extra.js", "DICT_EXTRA");
-console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " + realExtra + " 条\n");
+const realPhrase = countDict("dict-phrase.js", "DICT_PHRASE");
+console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " + realExtra +
+  " 条，词组 " + realPhrase + " 条\n");
 
 // ---------- 主流程 ----------
 (async function run() {
   const w = createWorker({ withDict: true });
 
   // ---- 装配校验 ----
-  check("importScripts 调用了 3 个文件", w.importCalls.length === 3, JSON.stringify(w.importCalls));
-  check("importScripts 顺序正确（dict -> dict-extra -> dict-lookup）",
-    w.importCalls.join(",") === "dict.js,dict-extra.js,dict-lookup.js",
+  check("importScripts 调用了 4 个文件", w.importCalls.length === 4, JSON.stringify(w.importCalls));
+  check("importScripts 顺序正确（dict -> dict-extra -> dict-phrase -> dict-lookup）",
+    w.importCalls.join(",") === "dict.js,dict-extra.js,dict-phrase.js,dict-lookup.js",
     JSON.stringify(w.importCalls));
   check("worker 全局可见 LOCAL_DICT",
     w.sandbox.LOCAL_DICT && Object.keys(w.sandbox.LOCAL_DICT).length === realCore,
@@ -173,6 +175,9 @@ console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " +
   check("worker 全局可见 DICT_EXTRA",
     w.sandbox.DICT_EXTRA && Object.keys(w.sandbox.DICT_EXTRA).length === realExtra,
     "实际 " + (w.sandbox.DICT_EXTRA ? Object.keys(w.sandbox.DICT_EXTRA).length : "undefined"));
+  check("worker 全局可见 DICT_PHRASE",
+    w.sandbox.DICT_PHRASE && Object.keys(w.sandbox.DICT_PHRASE).length === realPhrase,
+    "实际 " + (w.sandbox.DICT_PHRASE ? Object.keys(w.sandbox.DICT_PHRASE).length : "undefined"));
   check("worker 全局可见 lookupLocal 函数", typeof w.sandbox.lookupLocal === "function");
   check("worker 全局可见 buildLocalResult 函数", typeof w.sandbox.buildLocalResult === "function");
   check("已注册 onMessage 监听器", w.hasMessageHandler());
@@ -182,10 +187,11 @@ console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " +
   const info = await w.send({ type: "HT_DICT_INFO" });
   check("HT_DICT_INFO 返回成功", info && info.ok === true, JSON.stringify(info));
   check("HT_DICT_INFO 词条数与文件一致",
-    info && info.core === realCore && info.extra === realExtra,
-    info ? `core ${info.core}/${realCore}，extra ${info.extra}/${realExtra}` : "无响应");
+    info && info.core === realCore && info.extra === realExtra && info.phrase === realPhrase,
+    info ? `core ${info.core}/${realCore}，extra ${info.extra}/${realExtra}，phrase ${info.phrase}/${realPhrase}` : "无响应");
   check("HT_DICT_INFO 返回合计与版本",
-    info && info.total === realCore + realExtra && typeof info.version === "string",
+    info && info.total === realCore + realExtra + realPhrase &&
+    info.words === realCore + realExtra && typeof info.version === "string",
     info ? "total " + info.total + "，version " + info.version : "无响应");
 
   // ---- HT_LOOKUP：精选词库 ----
@@ -228,7 +234,110 @@ console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " +
   check("精选词条不会被扩展库覆盖（tier 仍为 core）",
     coreTier && coreTier.result && coreTier.result.tier === "core");
 
-  // ---- 未收录词 ----
+  // ---- HT_LOOKUP：词组查询（v1.3.0）----
+  console.log("\n[词组] 多词查询链路（分层优先）");
+
+  // 单词未收录 → 词组命中
+  // 注意：必须选「首词不在单词词库里」的词组，否则单词优先会先命中单词，
+  // 词组分支根本走不到（abide by 就是反例：abide 本身在扩展词库里）。
+  const ph = await w.send({ type: "HT_LOOKUP", word: "insofar", phrases: ["insofar as"] });
+  check("单词未收录时回退词组命中", ph && ph.ok && ph.found, JSON.stringify(ph).slice(0, 140));
+  check("词组结果标记 tier=phrase",
+    ph && ph.result && ph.result.tier === "phrase",
+    ph && ph.result ? ph.result.tier : "无");
+  check("词组 matched 为完整词组",
+    ph && ph.result && ph.result.matched === "insofar as",
+    ph && ph.result ? ph.result.matched : "无");
+  check("词组释义含中文", ph && ph.result && /范围|限度|在/.test(ph.result.plain || ""),
+    ph && ph.result ? ph.result.plain : "无");
+
+  // ---- 分层优先：core 单词胜出 ----
+  // environment 是精选词条（core），即使词组也命中，仍应返回单词
+  const coreWins = await w.send({
+    type: "HT_LOOKUP", word: "environment", phrases: ["environment protection"]
+  });
+  check("core 单词优先（精选词条不被词组抢走）",
+    coreWins && coreWins.result && coreWins.result.tier === "core" &&
+    coreWins.result.matched === "environment",
+    coreWins && coreWins.result ? coreWins.result.tier + "/" + coreWins.result.matched : "无");
+
+  // the 是 core 虚词 → 返回 the 而非 out of the blue
+  const theCore = await w.send({
+    type: "HT_LOOKUP", word: "the", phrases: ["of the blue", "out of the blue"]
+  });
+  check("core 虚词 the 优先于长词组 out of the blue",
+    theCore && theCore.result && theCore.result.tier === "core" &&
+    theCore.result.matched === "the",
+    theCore && theCore.result ? theCore.result.tier + "/" + theCore.result.matched : "无");
+
+  // ---- 分层优先：extra 单词让位词组 ----
+  // pool 只在扩展词库（extra），swimming pool 是词组 → 词组应胜出
+  const poolPhrase = await w.send({
+    type: "HT_LOOKUP", word: "pool", phrases: ["swimming pool"]
+  });
+  check("extra 单词让位词组（pool → swimming pool）",
+    poolPhrase && poolPhrase.result && poolPhrase.result.tier === "phrase",
+    poolPhrase && poolPhrase.result ? poolPhrase.result.tier + "/" + poolPhrase.result.matched : "无");
+  check("让位后释义为「游泳池」",
+    poolPhrase && poolPhrase.result && /游泳池/.test(poolPhrase.result.plain || ""),
+    poolPhrase && poolPhrase.result ? poolPhrase.result.plain : "无");
+
+  // extra 单词但词组未命中 → 回落到该单词
+  const extraFallback = await w.send({
+    type: "HT_LOOKUP", word: "pool", phrases: ["pool zzzzq"]
+  });
+  check("extra 单词在词组未命中时回落返回单词",
+    extraFallback && extraFallback.result && extraFallback.result.tier === "extra" &&
+    extraFallback.result.matched === "pool",
+    extraFallback && extraFallback.result ? extraFallback.result.tier + "/" + extraFallback.result.matched : "无");
+
+  // 候选按「由短到长」试，短的先命中即止
+  const shortest = await w.send({
+    type: "HT_LOOKUP", word: "zzzzq", phrases: ["insofar as", "insofar as zzzzq"]
+  });
+  check("候选按由短到长命中（短的优先）",
+    shortest && shortest.result && shortest.result.matched === "insofar as",
+    shortest && shortest.result ? shortest.result.matched : "无");
+
+  // 无 phrases 字段时行为与旧版一致（向后兼容）
+  const noPhrase = await w.send({ type: "HT_LOOKUP", word: "efficiency" });
+  check("缺 phrases 字段时仍正常查单词（向后兼容）",
+    noPhrase && noPhrase.found && noPhrase.result.tier === "core");
+
+  // 单词与词组都未收录
+  const bothMiss = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq", phrases: ["zzzz qqq"] });
+  check("单词与词组都未收录时返回 found:false",
+    bothMiss && bothMiss.ok === true && bothMiss.found === false, JSON.stringify(bothMiss));
+
+  // 词组含首部冠词冗余 → lookupPhrase 去掉冠词重试
+  const stripArt = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq", phrases: ["the insofar as"] });
+  check("词组含冗余首冠词时仍能命中（去冠词重试）",
+    stripArt && stripArt.result && stripArt.result.tier === "phrase",
+    stripArt && stripArt.result ? stripArt.result.matched : "未命中");
+
+  // 空白/全角空格规范化
+  const messy = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq", phrases: ["  insofar\u00a0\u00a0 as  "] });
+  check("词组空白/不换行空格被规范化后命中",
+    messy && messy.result && messy.result.tier === "phrase",
+    messy && messy.result ? messy.result.matched : "未命中");
+
+  // 词组含标点 → 形状校验失败，不误命中
+  const punct = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq", phrases: ["insofar as, and"] });
+  check("词组含标点时判为未命中（不硬凑）",
+    punct && punct.found === false, JSON.stringify(punct));
+
+  // 单段候选（不含空格）不应被当成词组
+  const single = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq", phrases: ["insofar"] });
+  check("候选不含空格时不走词组分支",
+    single && single.found === false, JSON.stringify(single));
+
+  // phrases 非数组时不抛错
+  const badPhrases = await w.send({ type: "HT_LOOKUP", word: "efficiency", phrases: "not-an-array" });
+  check("phrases 非数组时忽略并正常返回单词",
+    badPhrases && badPhrases.found && badPhrases.result.tier === "core",
+    JSON.stringify(badPhrases).slice(0, 120));
+
+  // 未收录词 ----
   const miss = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq" });
   check("未收录词返回 ok:true + found:false（交由在线兜底）",
     miss && miss.ok === true && miss.found === false, JSON.stringify(miss));

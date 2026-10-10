@@ -30,7 +30,7 @@ t("content.js translateWord 已改为 async", /async\s+function\s+translateWord/
 t("content.js 用 reqSeq 丢弃过期异步响应",
   /seq\s*!==\s*state\.reqSeq/.test(contentSrc));
 t("content.js attemptTranslate 吞掉 translateWord 的 rejection",
-  /translateWord\(hit\.word\)\.catch/.test(contentSrc));
+  /translateWord\(hit\.word,\s*phrases\)\.catch/.test(contentSrc));
 
 // --- 2. 后台消息契约 ---
 const bgSrc = fs.readFileSync(path.join(DIR, "background.js"), "utf8");
@@ -68,7 +68,10 @@ t("HT_LOOKUP 返回渲染就绪结构", (() => {
 })());
 t("HT_DICT_INFO 同步返回", (() => {
   const r = sendSync({ type: "HT_DICT_INFO" });
-  return r && r.ok === true && r.total === 30940;
+  // v1.3.0 起 total 含词组，且新增 words 字段（单词合计）
+  return r && r.ok === true && r.total > 0 &&
+    r.total === r.words + r.phrase &&
+    r.words === r.core + r.extra;
 })());
 t("HT_TRANSLATE 仍返回 true（异步响应契约保持）",
   handler({ type: "HT_TRANSLATE", word: "test" }, {}, () => {}) === true);
@@ -76,6 +79,59 @@ t("未知类型不返回 true（避免悬挂回调）",
   handler({ type: "HT_UNKNOWN_XYZ" }, {}, () => {}) !== true);
 t("无 type 字段不抛错",
   (() => { try { handler({}, {}, () => {}); return true; } catch (e) { return false; } })());
+
+// --- 2b. 词组查询契约（v1.3.0）---
+t("词组查询未收录时不抛错",
+  (() => { const r = sendSync({ type: "HT_LOOKUP", word: "zzzzq", phrase: "zzzz qqq" });
+    return r && r.ok === true && r.found === false; })());
+t("phrase 为 null/undefined 时不影响单词查询",
+  (() => {
+    const a = sendSync({ type: "HT_LOOKUP", word: "efficiency", phrase: null });
+    const b = sendSync({ type: "HT_LOOKUP", word: "efficiency", phrase: undefined });
+    return a && a.found && b && b.found;
+  })());
+t("phrase 为非字符串（数字/对象）时不抛错",
+  (() => {
+    try {
+      sendSync({ type: "HT_LOOKUP", word: "efficiency", phrase: 123 });
+      sendSync({ type: "HT_LOOKUP", word: "efficiency", phrase: {} });
+      return true;
+    } catch (e) { return false; }
+  })());
+t("超长 phrase 不拖慢查询（长度上限守卫）",
+  (() => {
+    const long = new Array(60).join("word ");
+    const r = sendSync({ type: "HT_LOOKUP", word: "zzzzq", phrase: long });
+    return r && r.found === false;
+  })());
+t("content.js 有词组候选生成函数 phraseCandidates",
+  /function\s+phraseCandidates\s*\(/.test(contentSrc));
+t("content.js 有相邻词收集函数 neighborWords",
+  /function\s+neighborWords\s*\(/.test(contentSrc));
+t("content.js 词组候选有词数上限守卫",
+  /PHRASE_MAX_WORDS\s*=\s*\d+/.test(contentSrc));
+t("content.js 词组扩展不跨越标点（只认空格）",
+  /function\s+isPhraseSpace[\s\S]{0,200}ch\s*===\s*" "/.test(contentSrc));
+t("content.js wordAtPoint 返回 phrases 数组",
+  /phrases:\s*phraseCandidates\(/.test(contentSrc));
+t("content.js 去重键为「单词 + 最长候选」",
+  /const\s+ck\s*=\s*w\s*\+\s*"\\u0000"/.test(contentSrc));
+t("content.js 缓存键与去重键一致",
+  /const\s+key\s*=\s*rawWord\.toLowerCase\(\)\s*\+\s*"\\u0000"/.test(contentSrc));
+t("content.js 气泡角标区分词组来源",
+  /tier\s*===\s*"phrase"\s*\?\s*"本地词库 · 词组"/.test(contentSrc));
+t("background.js 分层优先：core 单词直接胜出",
+  /wordHit\.tier\s*===\s*"core"[\s\S]{0,200}buildLocalResult\(wordHit\)/.test(bgSrc));
+t("background.js 分层优先：词组按候选顺序命中即止",
+  /for\s*\(const\s+p\s+of\s+list\)[\s\S]{0,400}phraseHit[\s\S]{0,120}return/.test(bgSrc));
+t("background.js 词组全未命中时回落 extra 单词",
+  /if\s*\(wordHit\)\s*return\s*\{\s*ok:\s*true,\s*found:\s*true/.test(bgSrc));
+t("background.js importScripts 顺序含 dict-phrase",
+  /importScripts\("dict\.js",\s*"dict-extra\.js",\s*"dict-phrase\.js",\s*"dict-lookup\.js"\)/.test(bgSrc));
+t("dict-phrase.js 缺失时不影响单词查询（DICT_READY 兜底）",
+  /typeof\s+DICT_PHRASE\s*===\s*"object"/.test(bgSrc));
+t("dict-lookup.js 词组缺失时优雅降级",
+  /typeof\s+DICT_PHRASE\s*===\s*"undefined"\s*\|\|\s*!DICT_PHRASE/.test(dictLookupSrc));
 
 // --- 3. 词库缺失时的降级（无 dict.js）---
 const sb2 = { console, setTimeout, clearTimeout, Promise, Map, Set, Object, Array, String, Number, Error, JSON };

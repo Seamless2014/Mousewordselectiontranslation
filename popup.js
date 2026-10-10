@@ -81,7 +81,7 @@
     render();
   });
 
-  // 显示本地词库条目数（精选词库 + ECDICT 扩展词库合计）。
+  // 显示本地词库条目数（精选单词 + ECDICT 扩展单词 + 词组词库合计）。
   //
   // v1.2.0 起 popup 不再自己加载 2.1 MB 词库（那样开一次 popup 就多一份堆占用），
   // 改为向 service worker 查询。后台未就绪时降级显示"—"，不影响其他设置项。
@@ -94,9 +94,10 @@
           return;
         }
         els.dictCount.textContent = resp.total.toLocaleString() + " 条";
+        var parts = ["精选单词 " + resp.core + " 条", "扩展单词 " + resp.extra + " 条"];
+        if (resp.phrase) parts.push("词组 " + resp.phrase + " 条");
         els.dictCount.title =
-          "精选词库 " + resp.core + " 条 + 扩展词库 " + resp.extra + " 条" +
-          "（由后台统一持有，内存不随标签页增长）";
+          parts.join(" + ") + "（由后台统一持有，内存不随标签页增长）";
       });
     } catch (_) {
       els.dictCount.textContent = "未加载";

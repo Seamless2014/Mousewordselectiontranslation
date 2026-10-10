@@ -2,7 +2,7 @@
  * 悬停取词翻译 —— 内容脚本（轻壳）
  *
  * 职责：
- *  1. 监听鼠标悬停，提取光标下的英文单词
+ *  1. 监听鼠标悬停，提取光标下的英文单词或词组
  *  2. 向后台查离线词库（HT_LOOKUP），未命中再走在线兜底（HT_TRANSLATE）
  *  3. 用跟随鼠标的气泡展示释义，鼠标离开自动消失
  *  4. 悬浮球开关 / 右键菜单 / 快捷键 三种启停方式
@@ -13,6 +13,11 @@
  *  （堆约 8.7 MB），20 个标签页 × 5 个 iframe 就是约 870 MB。
  *  现在词库由 service worker 全局持有一份，本文件只负责取词、请求、渲染。
  *  词形还原与词条组装也一并移到后台（dict-lookup.js），避免双份实现漂移。
+ *
+ * v1.3.0 词组支持：悬停取词从「单个单词」扩展为「单词 + 一组词组候选」。
+ *  以悬停词为中心向左右收集相邻词，枚举所有子串（由短到长）一并交给后台，
+ *  后台按「core 单词优先 / extra 单词让位词组」的分层规则决定最终返回哪一个。
+ *  详见 phraseCandidates 与 background.js 的 lookupOffline。
  */
 (function () {
   "use strict";
@@ -21,7 +26,7 @@
   if (window.__hoverTranslateInjected) return;
   window.__hoverTranslateInjected = true;
 
-  const HT_VERSION = "1.2.1";
+  const HT_VERSION = "1.3.0";
 
   // 后台查词的超时保护：本地查词实测 1–3 ms，200 ms 已经非常宽松。
   // 设这个上限是为了应对「service worker 正在重建」等极端情况 ——
@@ -54,10 +59,11 @@
   /**
    * 向后台请求离线查词。
    *
-   * @param {string} word 原始单词（大小写不限）
+   * @param {string} word   原始单词（大小写不限）
+   * @param {string[]} [phrases] 词组候选（由短到长）。仅当单词未命中时才尝试。
    * @returns {Promise<object|null>} 命中返回渲染就绪的结果对象，未命中/失败返回 null
    */
-  function requestLocal(word) {
+  function requestLocal(word, phrases) {
     return new Promise(resolve => {
       let settled = false;
       const done = v => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
@@ -67,11 +73,14 @@
 
       let sent = false;
       try {
-        const ret = chrome.runtime.sendMessage({ type: "HT_LOOKUP", word: word }, resp => {
-          if (chrome.runtime.lastError) { done(null); return; }
-          if (resp && resp.ok && resp.found && resp.result) done(resp.result);
-          else done(null);
-        });
+        const ret = chrome.runtime.sendMessage(
+          { type: "HT_LOOKUP", word: word, phrases: phrases || [] },
+          resp => {
+            if (chrome.runtime.lastError) { done(null); return; }
+            if (resp && resp.ok && resp.found && resp.result) done(resp.result);
+            else done(null);
+          }
+        );
         sent = true;
         // 极少数环境下 sendMessage 返回 Promise 而不回调（无回调参数时），
         // 这里保留返回值仅用于吞掉未处理的 rejection，避免控制台噪音。
@@ -91,9 +100,31 @@
     return /[A-Za-z'-]/.test(ch);
   }
 
+  // 词组查询时，单词之间的分隔只能是空格（不含标点）。
+  // 词组词库的键是「纯小写字母 + 单空格」，所以遇到逗号/句号就该停下，
+  // 否则 "look forward to, and" 这类会一路吃进去导致查不到。
+  function isPhraseSpace(ch) {
+    return ch === " " || ch === "\u00a0" || ch === "\t";
+  }
+
+  // 词组候选的最大词数：与词库构建时的上限（6 段）保持一致
+  const PHRASE_MAX_WORDS = 6;
+
   /**
-   * 从鼠标位置取词。
+   * 从鼠标位置取「词」或「词组」。
+   *
    * 使用 caretRangeFromPoint 拿到文本节点偏移，再向两侧扩展到完整单词。
+   *
+   * v1.3.0 起额外给出一组「词组候选」（phrases）：
+   *   以悬停词为中心，逐个向左右扩展生成的子串，由短到长排列。
+   *
+   * 为什么给一组而不是一个？
+   *   悬停在 "insofar as possible abide by" 的 insofar 上时，唯一正确的
+   *   答案 "insofar as" 恰好是「左 0 词 / 右 1 词」——固定的「左右各取 2 词」
+   *   会产出 "we should insofar as possible" 而查不到。词组长度不可预知，
+   *   所以只能让后台按「由短到长」逐个试，命中即止。
+   *
+   * @returns {{word:string, phrases:string[], node:Node, start:number, end:number}|null}
    */
   function wordAtPoint(x, y) {
     let range = null;
@@ -134,7 +165,104 @@
     // 过长的串忽略（多为编码/混淆串）
     if (word.length > 45) return null;
 
-    return { word: word, node: node, start: start, end: end };
+    return {
+      word: word,
+      phrases: phraseCandidates(text, start, end),
+      node: node,
+      start: start,
+      end: end
+    };
+  }
+
+  /**
+   * 取 [start, end) 处单词的左右相邻单词序列。
+   *
+   * 只在同一个文本节点内扩展——跨节点（如 <b> 包裹）会让取词范围难以界定，
+   * 且词组词库本身按「文本里的连续空格串」构建，同节点扩展已覆盖绝大多数场景。
+   *
+   * @returns {{left:string[], right:string[]}} 左侧按「紧邻→远」排列，右侧同理
+   */
+  function neighborWords(text, start, end) {
+    const left = [];
+    const right = [];
+
+    // 向左收集
+    let i = start;
+    while (left.length < PHRASE_MAX_WORDS - 1) {
+      let j = i - 1;
+      if (j < 0 || !isPhraseSpace(text[j])) break;
+      while (j >= 0 && isPhraseSpace(text[j])) j--;   // 跳过连续空格
+      let k = j;
+      while (k >= 0 && isWordChar(text[k])) k--;      // 退回单词起始
+      if (k === j) break;                              // 空格前不是字母，停
+      const seg = text.slice(k + 1, j + 1);
+      if (!/^[A-Za-z][A-Za-z'-]*$/.test(seg)) break;   // 段内必须纯字母
+      left.push(seg);
+      i = k + 1;
+    }
+
+    // 向右收集
+    let p = end;
+    while (right.length < PHRASE_MAX_WORDS - 1) {
+      let j = p;
+      if (j >= text.length || !isPhraseSpace(text[j])) break;
+      while (j < text.length && isPhraseSpace(text[j])) j++;
+      let k = j;
+      while (k < text.length && isWordChar(text[k])) k++;
+      if (k === j) break;
+      const seg = text.slice(j, k);
+      if (!/^[A-Za-z][A-Za-z'-]*$/.test(seg)) break;
+      right.push(seg);
+      p = k;
+    }
+
+    return { left: left, right: right };
+  }
+
+  /**
+   * 生成词组候选列表：以 [start, end) 为中心，向两侧扩展的所有子串。
+   *
+   * 排序策略（决定命中优先级）：
+   *   1. 先按「总词数」由短到长 —— 短搭配更可能是固定词组。
+   *   2. 同长度内，优先「悬停词位于两端」的候选。
+   *      例：悬停 out 时，同为 3 词的 "out of the" 与 "out of the blue" 不存在；
+   *      但 4 词时有 "out of the blue"，而 "out of" 只有 2 词会先命中。
+   *      这条规则确保 "look forward" 不抢先于 "look forward to" 的地位
+   *      （两者都含悬停词，长度决定顺序，短的先）。
+   *   3. 再按「围绕中心更紧凑」排列（左右词数更均衡）。
+   *
+   * 为什么不做「最长优先」：
+   *   "as soon as possible" 与 "as soon as" 都收录时，最长优先会返回
+   *   "尽快"，而 "as soon as"（"一...就"）才是真正的核心搭配。
+   *   长度不可作为质量代理，所以仍以「短的先」为准。
+   *
+   * @returns {string[]} 规范化后的词组候选（小写、单空格），可能为空数组
+   */
+  function phraseCandidates(text, start, end) {
+    const { left, right } = neighborWords(text, start, end);
+    const center = text.slice(start, end).replace(/^['-]+|['-]+$/g, "").toLowerCase();
+    if (!center) return [];
+
+    const out = [];
+    const seen = Object.create(null);
+
+    // 枚举左右各取 a / b 个词的所有组合
+    for (let total = 2; total <= PHRASE_MAX_WORDS; total++) {
+      for (let a = 0; a < total; a++) {          // a = 左侧词数
+        const b = total - 1 - a;                  // b = 右侧词数
+        if (a > left.length || b > right.length) continue;
+        // 左词按「远→近」排列，右词按「近→远」排列
+        const seg = [];
+        for (let i = a - 1; i >= 0; i--) seg.push(left[i]);
+        seg.push(center);
+        for (let i = 0; i < b; i++) seg.push(right[i]);
+        const key = seg.join(" ").toLowerCase();
+        if (seen[key]) continue;
+        seen[key] = 1;
+        out.push(key);
+      }
+    }
+    return out;
   }
 
   // 忽略不该取词的区域
@@ -205,9 +333,10 @@
     const channelName = { google: "Google", mymemory: "MyMemory" }[res.channel] || "";
     let badge;
     if (res.source === "local") {
-      // 区分精选词库 / ECDICT 扩展词库 / 连字符合成词，便于判断释义质量来源
+      // 区分精选词库 / ECDICT 扩展词库 / 连字符合成词 / 词组，便于判断释义质量来源
       badge = res.tier === "extra" ? "本地词库 · 扩展"
             : res.tier === "compound" ? "本地词库 · 组合"
+            : res.tier === "phrase" ? "本地词库 · 词组"
             : "本地词库";
     } else {
       badge = "在线翻译" + (channelName ? " · " + channelName : "");
@@ -275,9 +404,17 @@
   }
 
   // ---------- 翻译主流程 ----------
-  async function translateWord(rawWord) {
+  /**
+   * @param {string} rawWord 悬停位置所在的那个单词
+   * @param {string[]} [rawPhrases] 以该单词为中心扩展出的词组候选（由短到长）
+   */
+  async function translateWord(rawWord, rawPhrases) {
     const seq = ++state.reqSeq;
-    const key = rawWord.toLowerCase();
+    // 缓存键与 attemptTranslate 的去重键保持一致（单词 + 最长候选）。
+    // 同一单词在不同上下文里可能命中不同词组，加上上下文才能正确区分。
+    const phrases = rawPhrases || [];
+    const key = rawWord.toLowerCase() + "\u0000" +
+      (phrases.length ? phrases[phrases.length - 1] : "");
 
     // 命中缓存
     const cached = state.cache.get(key);
@@ -290,7 +427,8 @@
     // 1) 离线词库（后台集中持有）。
     //    官方精选词条命中率约 93%，所以"先加载态、后结果"不会闪 ——
     //    正常情况下后台 1–3 ms 就返回，加载态根本来不及出现。
-    const local = await requestLocal(rawWord);
+    //    命中顺序由后台决定：单词优先（更快），未命中再按候选由短到长试词组。
+    const local = await requestLocal(rawWord, phrases);
     if (seq !== state.reqSeq) return; // 已被更晚的请求取代（鼠标已移到别的词）
 
     if (local) {
@@ -301,6 +439,8 @@
     }
 
     // 2) 在线兜底
+    //    注意：在线通道传「单词」而非词组——单词形态更稳定，
+    //    且国内网络下词组的失败率并未更低。
     if (!state.onlineFallback) {
       renderResult({
         word: rawWord, display: rawWord, groups: [],
@@ -411,15 +551,23 @@
       scheduleHide(120);
       return;
     }
+    // 去重键必须是「悬停的那个词」，不能用词组候选做键。
+    // 反例：悬停 "insofar as" 的 insofar 与 as，两者的候选列表末位是同一个
+    // 最长串，用候选做键会把第二个词误判为"已在显示"而直接跳过。
+    // 单词本身唯一标识了鼠标位置，且同词重复悬停本就该复用气泡。
     const w = hit.word.toLowerCase();
-    if (w === state.currentWord &&
+    // 词组结果与单词结果可能不同：同一个词在不同上下文里属于不同词组，
+    // 所以把「最长候选」也并进键里，换上下文时能正确重查。
+    const phrases = hit.phrases || [];
+    const ck = w + "\u0000" + (phrases.length ? phrases[phrases.length - 1] : "");
+    if (ck === state.currentWord &&
         state.bubble && state.bubble.classList.contains("ht-show")) {
-      return; // 同一个词且气泡已在显示，不重复查询
+      return; // 同一位置且气泡已在显示，不重复查询
     }
-    state.currentWord = w;
+    state.currentWord = ck;
     // translateWord 是 async：这里 deliberately 不 await，
     // 它内部用 reqSeq 自行丢弃过期响应，不会阻塞后续鼠标事件。
-    translateWord(hit.word).catch(() => {});
+    translateWord(hit.word, phrases).catch(() => {});
   }
 
   function onMouseOutWindow(e) {
@@ -554,7 +702,7 @@
 
     // 加载成功标记：用户可在控制台（F12）确认脚本已注入
     try {
-      console.info("%c[悬停取词翻译] v" + HT_VERSION + " 已加载，悬停英文单词即可翻译",
+      console.info("%c[悬停取词翻译] v" + HT_VERSION + " 已加载，悬停英文单词或词组即可翻译",
         "color:#4a8cff;font-weight:600");
     } catch (_) {}
   }

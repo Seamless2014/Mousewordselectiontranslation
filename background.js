@@ -27,17 +27,20 @@
 // ---------- 词库加载（集中持有，全局唯一副本）----------
 //
 // importScripts 只在 service worker 顶层可用，且要求同源相对路径。
-// 顺序不能改：dict-lookup.js 里 lookupLocal() 依赖 LOCAL_DICT / DICT_EXTRA。
-// 注意：三个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
-importScripts("dict.js", "dict-extra.js", "dict-lookup.js");
+// 顺序不能改：dict-lookup.js 里 lookupLocal() 依赖 LOCAL_DICT / DICT_EXTRA /
+// DICT_PHRASE，必须在最后加载。dict-phrase.js 缺失时词组查询自动降级，
+// 不影响单词查询。
+// 注意：四个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
+importScripts("dict.js", "dict-extra.js", "dict-phrase.js", "dict-lookup.js");
 
-const HT_BG_VERSION = "1.2.1";
+const HT_BG_VERSION = "1.3.0";
 
-// dict.js / dict-extra.js 末尾都有「仅保留纯小写字母键」的自检，
+// dict.js / dict-extra.js / dict-phrase.js 末尾都有「仅保留合法键」的自检，
 // 这里再兜一层：确认词库真的可用，否则把查词请求直接判为未命中（走在线兜底）。
 const DICT_READY =
   (typeof LOCAL_DICT === "object" && !!LOCAL_DICT) ||
-  (typeof DICT_EXTRA === "object" && !!DICT_EXTRA);
+  (typeof DICT_EXTRA === "object" && !!DICT_EXTRA) ||
+  (typeof DICT_PHRASE === "object" && !!DICT_PHRASE);
 
 // ---------- 超时与缓存配置 ----------
 const CHANNEL_TIMEOUT = 700;       // 常规单通道超时（毫秒）
@@ -274,14 +277,49 @@ async function translate(word, opts) {
 //   service worker 空闲约 30s 会被浏览器回收，但 importScripts 在重建时会
 //   重新执行，所以 DICT_READY 总是正确的。这里额外做的是——把"首次查词"作为
 //   唯一的重建触发点，不需要 chrome.alarms 常驻唤醒（那会白白耗电）。
-function lookupOffline(rawWord) {
+// 字段拆解（v1.3.0）：
+//   msg.word    —— 悬停位置所在的单个单词
+//   msg.phrases —— 以该单词为中心扩展出的词组候选数组（由短到长，可能为空）
+//
+// 查询顺序（分层优先，2026-10-10 决策）：
+//   1. 先查单词。
+//   2. 单词命中且 tier=core（精选词库，手工校订）→ 直接返回单词。
+//      理由：精选单词释义质量高于词组（"the" 就是"定冠词"，不必给整条搭配），
+//      且点某个字就查那个字，最符合直觉。
+//   3. 单词未命中，或命中的是 extra（ECDICT 机器生成词条）→ 按候选由短到长
+//      试词组，命中即用。
+//      理由：扩展词条释义质量明显偏低（pool = "池；水塘"），
+//      而词组是固定搭配、释义更准（swimming pool = "游泳池"）。
+//
+// 例：
+//   悬停 "swimming pool" 的 pool → pool 仅 extra，让位词组 → "游泳池"
+//   悬停 "out of the blue" 的 the → the 是 core，返回 "定冠词"
+//   悬停 "insofar as" 的 insofar → 单词未收录 → "在...的限度内"
+function lookupOffline(rawWord, rawPhrases) {
   const w = String(rawWord || "").toLowerCase().trim();
-  if (!w) return { ok: false, found: false, reason: "empty" };
+  const list = Array.isArray(rawPhrases) ? rawPhrases : [];
+  if (!w && !list.length) return { ok: false, found: false, reason: "empty" };
   if (!DICT_READY) return { ok: false, found: false, reason: "dict-unavailable" };
 
-  const hit = lookupLocal(w);
-  if (!hit) return { ok: true, found: false };
-  return { ok: true, found: true, result: buildLocalResult(hit) };
+  const wordHit = w ? lookupLocal(w) : null;
+  // 精选单词直接胜出，不查词组
+  if (wordHit && wordHit.tier === "core") {
+    return { ok: true, found: true, result: buildLocalResult(wordHit) };
+  }
+
+  // 词组按候选顺序（由短到长）试，命中即用
+  if (list.length) {
+    for (const p of list) {
+      const s = String(p || "");
+      if (s.indexOf(" ") < 0) continue; // 单段不算词组
+      const phraseHit = lookupLocal(s);
+      if (phraseHit) return { ok: true, found: true, result: buildLocalResult(phraseHit) };
+    }
+  }
+
+  // 词组都没命中 → 回落到那个 extra 单词（有总比没有好）
+  if (wordHit) return { ok: true, found: true, result: buildLocalResult(wordHit) };
+  return { ok: true, found: false };
 }
 
 // ---------- 消息路由 ----------
@@ -296,7 +334,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // 本地查词是纯内存操作，无需 async，但保持与 HT_TRANSLATE 一致的响应契约
     let resp;
     try {
-      resp = lookupOffline(msg.word);
+      resp = lookupOffline(msg.word, msg.phrases);
     } catch (e) {
       resp = { ok: false, found: false, reason: String(e && e.message ? e.message : e) };
     }
@@ -308,7 +346,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // popup 用于展示词条数（popup 不再自己加载 2.1 MB 词库）
     const core = typeof LOCAL_DICT === "object" && LOCAL_DICT ? Object.keys(LOCAL_DICT).length : 0;
     const extra = typeof DICT_EXTRA === "object" && DICT_EXTRA ? Object.keys(DICT_EXTRA).length : 0;
-    sendResponse({ ok: DICT_READY, core: core, extra: extra, total: core + extra, version: HT_BG_VERSION });
+    const phrase = typeof DICT_PHRASE === "object" && DICT_PHRASE ? Object.keys(DICT_PHRASE).length : 0;
+    sendResponse({
+      ok: DICT_READY, core: core, extra: extra, phrase: phrase,
+      words: core + extra, total: core + extra + phrase, version: HT_BG_VERSION
+    });
     return false;
   }
 

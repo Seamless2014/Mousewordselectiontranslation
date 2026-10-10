@@ -10,10 +10,12 @@
 
 | 特性 | 说明 |
 |---|---|
-| 悬停即译 | 鼠标停在单词上约 320ms 自动弹出中文释义，**同一段落内换词也能持续翻译** |
+| 悬停即译 | 鼠标停在单词**或词组**上约 320ms 自动弹出中文释义，**同一段落内换词也能持续翻译** |
 | 移开即隐 | 鼠标离开气泡自动消失，不打断阅读 |
-| 本地词库优先 | **内置约 3 万词**（精选 940 条 + ECDICT 高频扩展），**离线可用** |
-| 内存恒定 | 词库由后台统一持有，**开多少标签页都只占一份内存**（约 8.8 MB，不随标签页增长） |
+| 本地词库优先 | **内置约 11.7 万词条**（精选单词 940 + ECDICT 高频扩展 3 万 + 词组 8.59 万），**离线可用** |
+| 词组识别 | 悬停在 `figure out`、`out of the blue`、`a variety of` 等搭配上时自动识别**整条词组**并翻译，不必逐词拼凑 |
+| 分层优先 | core 单词 > 词组 > extra 单词：判断词与词组均命中时，**core 精选单词胜出**，extra 机器词条让位词组 |
+| 内存恒定 | 词库由后台统一持有，**开多少标签页都只占一份内存**（约 9.5 MB SW 堆，不随标签页增长） |
 | 在线兜底 | 本地未收录的词自动联网翻译（Google 主通道 + MyMemory 备用通道），**失败自动重试**，连续失败的通道短暂冷却 |
 | 合成词拆词 | `decision-maker` / `real-time` / `mother-in-law` 自动拆段查本地词库，无需联网 |
 | 词形还原 | `implementations` → `implementation`、`running` → `run`、`analyses` → `analysis` |
@@ -79,8 +81,8 @@
 **4. 确认脚本已加载（最快的自检）**
 按 `F12` 打开控制台，应看到两行蓝字：
 ```
-[悬停取词翻译] v1.2.0 已加载，悬停英文单词即可翻译
-[悬停取词翻译] 离线词库已就绪：精选 940 条 + 扩展 30000 条 = 30940 条（由后台统一持有）
+[悬停取词翻译] v1.3.0 已加载，悬停英文单词或词组即可翻译
+[悬停取词翻译] 离线词库已就绪：精选 940 条 + 扩展 30000 条 + 词组 85867 条（由后台统一持有）
 ```
 - 只有第一行、没有第二行 → **后台词库没起来**，去 `chrome://extensions` 点该扩展的
   「Service Worker」链接看报错；最常见原因是 `background.js` 的 `importScripts` 目标缺失。
@@ -122,11 +124,25 @@ v1.2.1 起针对这类抖动做了三层缓解，偶发超时应大幅减少：
 
 ### 某些单词查不到
 
-本地词库约 3 万词，覆盖日常、学术、技术、商务高频词（含开发者文档常见词与月份星期）。
-极生僻词、最新术语依赖在线兜底；若在线不可用则查不到。可按下方「词库说明」自行扩充。
+本地词库约 11.7 万词条（单词约 3.1 万 + 词组约 8.6 万），覆盖日常、学术、技术、商务高频词
+（含开发者文档常见词与月份星期），以及大量常用搭配与短语动词。
+极生僻词、最新术语、以及未收录的长词组依赖在线兜底；若在线不可用则查不到。可按下方「词库说明」自行扩充。
 在扩展设置面板底部可看到当前**实际加载的本地词条数**——若显示「未加载」或数字异常偏小，
 说明**后台词库没加载成功**，请在 `chrome://extensions` 查看该扩展的
 「Service Worker」是否有 `importScripts` 报错，然后**重新加载扩展**并刷新页面。
+
+### 词组命中不理想
+
+词组按**词数由短到长**匹配，因此悬停 `blue` 于 `out of the blue` 中时，会先命中较短的
+`out of`（「在…外」）而非整条 `out of the blue`（「突然」）。
+
+这是**有意为之**：英语里短搭配（`as soon as`、`account for`）本身就是合法且高频的释义单元，
+若改成「最长优先」，`as soon as possible` 就会抢走 `as soon as` 的正确释义。若想看到完整词组，
+把鼠标停在**词组的最后一个词**上（如 `blue`）即可——此时可用候选更长，命中更完整。
+
+另一个已知取舍：若悬停词本身是 **core 精选单词**（如 `long`），即使它处于
+`in the long run` 这类词组中，也会优先显示单词自身的释义。这是「分层优先」策略的结果：
+手工维护的精选词条释义质量更高，不应被机器提取的词组覆盖。
 
 ---
 
@@ -139,8 +155,10 @@ hover-translate/
 ├── content.css        # 气泡与悬浮球样式
 ├── dict.js            # 精选词库（940 条，手工维护）
 ├── dict-extra.js      # 扩展词库（3 万条，由 ECDICT 自动生成，勿手工编辑）
-├── dict-lookup.js     # 词形还原 + 两级查词（唯一实现，由后台 importScripts 加载）
+├── dict-phrase.js     # 词组词库（8.59 万条，由 ECDICT + 短语动词自动生成，勿手工编辑）
+├── dict-lookup.js     # 词形还原 + 分层查词（单词/词组唯一实现，由后台 importScripts 加载）
 ├── build-dict.js      # 词库构建脚本：从 ECDICT CSV 生成 dict-extra.js
+├── build-phrases.py   # 词组构建脚本：从 ECDICT SQLite 生成 dict-phrase.js（Python 3）
 ├── background.js      # Service Worker：持有词库、离线查词、在线翻译代理、菜单/快捷键
 ├── popup.html/js      # 设置面板（词条数向后台查询，不再自己加载词库）
 ├── icons/             # 扩展图标
@@ -164,7 +182,7 @@ hover-translate/
 **推荐：一条命令跑全部**（自动定位 jsdom，无需手动设 `NODE_PATH`）
 
 ```bash
-node run-tests.js              # 全部套件（210 个用例）
+node run-tests.js              # 全部套件（281 个用例）
 node run-tests.js e2e switch   # 只跑名字含 e2e / switch 的套件
 ```
 
@@ -172,13 +190,20 @@ node run-tests.js e2e switch   # 只跑名字含 e2e / switch 的套件
 
 ```bash
 node test-verify.js      # 精选词库 + 词形还原（无需依赖）
-node test-extra.js       # 扩展词库结构 + 两级查词优先级（无需依赖）
+node test-extra.js       # 扩展词库结构 + 分层查词优先级（无需依赖）
 node test-background.js  # 后台查词 + importScripts 装配（无需依赖）
 node test-edge.js        # 边界场景 + 消息契约（无需依赖）
 node test-manifest.js    # 清单一致性：词库不得注入内容脚本（无需依赖）
 node test-perf.js        # 在线竞速/超时/缓存 + 离线查词耗时（无需依赖）
 node test-e2e.js         # 端到端 DOM 模拟（需 jsdom）
 node test-switch.js      # 开关链路 + 查词链路（需 jsdom）
+```
+
+词库相关的独立校验（构建后跑一次）：
+
+```bash
+node check-phrase.js         # 词组词库形状 / 释义缺失 / 与单词库同名键
+node check-phrase-lookup.js  # 词组查询链路抽查（含分层优先三种结局）
 ```
 
 内存收益实测：
@@ -192,8 +217,8 @@ node --expose-gc bench-memory.js 20 5   # 20 标签页 × 5 iframe
 `run-tests.js` 的八个套件跑在 Node/jsdom 模拟环境里；`verify-browser.js` 则启动
 **真实 Chromium**（`--load-extension` 加载本目录），验证三件模拟环境测不到的事：
 
-1. Service Worker 里 `importScripts` 真实装配 + 真实查词（35 项断言）
-2. 真实页面悬停取词：气泡渲染、中文释义、「本地词库 / 本地词库 · 扩展」角标、词形还原、Esc/移开隐藏
+1. Service Worker 里 `importScripts` 真实装配 + 真实查词 + **真实词组分层裁决**（50 项断言）
+2. 真实页面悬停取词：气泡渲染、中文释义、「本地词库 / 本地词库 · 扩展 / 本地词库 · 词组 / 本地词库 · 组合」角标、词形还原、Esc/移开隐藏
 3. **CDP 内存实测**：1 → 16 个标签页，SW 堆是否恒定、网页堆是否不含词库副本
 
 ```bash
@@ -203,12 +228,12 @@ NODE_PATH=".../node_modules" node verify-browser.js 20     # 指定标签页数
 NODE_PATH=".../node_modules" node verify-browser.js --no-memory   # 只验功能
 ```
 
-v1.2.0 实测参考值（Chromium 151）：
+v1.3.0 实测参考值（Chromium 151）：
 
 | 指标 | 1 个标签页 | 16 个标签页 |
 |---|---|---|
 | Service Worker 堆 | 9.5 MB | **9.5 MB（+0.0%）** |
-| 单个网页 JS 堆 | 1.8 MB | 1.4 MB（不含词库副本） |
+| 单个网页 JS 堆 | 2.2 MB | 1.4 MB（不含词库副本） |
 
 注意：`content_scripts` 的 `<all_urls>` **不包含 `data:` URL**，验收脚本内置了一个
 本地 HTTP 服务把测试页落在 `http://127.0.0.1` 上，属正常设计而非绕过。
@@ -221,16 +246,16 @@ v1.2.0 实测参考值（Chromium 151）：
 
 v1.1 及之前，`dict.js` / `dict-extra.js` 由 `manifest.content_scripts` 注入。但**内容脚本是「每个 frame 一份独立 JS 环境」**（`all_frames: true` 下标签页的每个 iframe 也算一份），于是：
 
-- 每份都要**独立解析** 2.1 MB 的 `dict-extra.js`
-- 每份都在 V8 堆里**独立持有**词库对象，实测堆增量 **8.8 MB/份**（源文本的 4.1 倍）
+- 每份都要**独立解析**近 6.2 MB 的词库脚本（`dict.js` + `dict-extra.js` + `dict-phrase.js`）
+- 每份都在 V8 堆里**独立持有**词库对象，实测堆增量约 **34 MB/份**（源文本的约 5.5 倍）
 
-推算 20 个标签页 × 平均 5 个 iframe = 100 份 ≈ **879 MB**，且同一份脚本被重复解析 100 次。
+推算 20 个标签页 × 平均 5 个 iframe = 100 份 ≈ **3.4 GB**，且同一份脚本被重复解析 100 次。
 
-v1.2.0 把词库移到 Service Worker（`background.js` 用 `importScripts("dict.js", "dict-extra.js", "dict-lookup.js")` 加载），**全局只持有一份**：
+v1.2.0 把词库移到 Service Worker（`background.js` 用 `importScripts("dict.js", "dict-extra.js", "dict-phrase.js", "dict-lookup.js")` 加载），**全局只持有一份**：
 
-| 项目 | v1.1（注入内容脚本） | v1.2（后台集中持有） |
+| 项目 | v1.1（注入内容脚本） | v1.2+（后台集中持有） |
 |---|---|---|
-| 内存占用（100 frame） | ≈ 879 MB | **8.8 MB 恒定** |
+| 内存占用（100 frame） | ≈ 3.4 GB（词库已扩至 11.7 万条） | **9.5 MB 恒定** |
 | 随标签页增长 | 线性增长 | **恒定不变** |
 | 词库解析次数 | 100 次 | **1 次** |
 | 每次查词 | 纯内存查找 | 多一次消息往返（约 1–3 ms） |
@@ -241,7 +266,7 @@ v1.2.0 把词库移到 Service Worker（`background.js` 用 `importScripts("dict
 
 - **惰性初始化**：Service Worker 空闲约 30 s 会被回收，用 `importScripts` 的重新执行 + 首次查词触发重建即可，**不需要 `chrome.alarms` 常驻唤醒**（那是白白耗电）。
 - **超时降级**：内容脚本查后台设 200 ms 上限（`LOCAL_LOOKUP_TIMEOUT`），超时直接走在线兜底，不卡住取词。
-- **查词逻辑单一实现**：词形还原、两级优先级、词条组装全部收在 `dict-lookup.js`；以前 `content.js` / `test-extra.js` / `test-verify.js` 各存一份副本，改一处要同步三处。
+- **查词逻辑单一实现**：词形还原、分层优先级（core 单词 / 词组 / extra 单词）、词条组装全部收在 `dict-lookup.js`；以前 `content.js` / `test-extra.js` / `test-verify.js` 各存一份副本，改一处要同步三处。
 - **popup 不再加载词库**：词条数改为发 `HT_DICT_INFO` 询问后台，避免「开一次 popup 多一份 2.1 MB 堆占用」。
 
 **为什么不用 SharedArrayBuffer**：跨进程共享内存需要页面自身返回 `COOP`/`COEP` 响应头，扩展无权为站点设置，因此不可行。
@@ -257,10 +282,20 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 注意：ECDICT 中大量变体形式（`negotiated`、`audited`、`running`）**本身就有独立词条**，
 会走"原词直命中"而非还原——这是有意的，因为 ECDICT 对变体的释义更精确（会标注"（…的过去式）"）。
 
-**两级词库查词**：`lookupLocal` 先查精选词库 `LOCAL_DICT`、再查扩展词库 `DICT_EXTRA`，
-原词优先于还原候选（即"词库直命中" > "词形还原命中"）。查词用 `hasOwnProperty` 判断，
-避免键名撞上 `Object.prototype` 的属性；`constructor` 这类词虽是 ECDICT 里的真实单词，
-也只会取到词典释义，不会拿到 JS 内置构造器。
+**分层词库查词**：`lookupLocal` 先查精选词库 `LOCAL_DICT`、再查词组库 `DICT_PHRASE`、
+最后查扩展词库 `DICT_EXTRA`；原词优先于还原候选（即"词库直命中" > "词形还原命中"）。
+查词用 `hasOwnProperty` 判断，避免键名撞上 `Object.prototype` 的属性；
+`constructor` 这类词虽是 ECDICT 里的真实单词，也只会取到词典释义，不会拿到 JS 内置构造器。
+
+**词组识别（v1.3.0）**：`content.js` 从悬停位置向左右收集相邻词，**枚举所有 2–6 词的子串**，
+按**由短到长**排序后随消息一并发给后台；后台逐个尝试，第一个命中即返回。
+不做「最长优先」是刻意的——`as soon as possible`（尽快）不该抢走 `as soon as`（一…就）的释义。
+候选枚举见 `phraseCandidates()`，相邻词收集见 `neighborWords()`（段内必须是 `[A-Za-z][A-Za-z'-]*`）。
+
+**分词难点**：`document.caretRangeFromPoint` 只给出字符偏移，词组边界要靠 `textContent` 回推，
+因此**规范化**很关键——`normalizePhrase()` 会把不换行空格 `\u00a0`、全角空格、换行、多空格
+统一成单空格，剥掉尾部标点，并在首字是冠词（`a`/`an`/`the`）时去掉冠词重试一次，
+这样 `a variety of` 与 `variety of` 都能命中。
 
 **在线兜底**：跨域请求统一由 Service Worker 代理（内容脚本受页面 CSP 限制，直接 fetch 会被拦截）。
 
@@ -299,7 +334,7 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 
 - **在线兜底依赖公共免费接口**（Google translate 免费端点 / MyMemory）。这些接口无需 Key，但可能不稳定、有频率限制，或在特定网络环境下不可达。此时仅本地词库生效。
 - **不支持整句/整段翻译**，定位是「查词」——这正是轻量的前提。
-- **本地词库约 3 万词**（精选 940 + ECDICT 高频扩展），覆盖日常、学术、技术、商务场景。极生僻词与最新专业术语仍依赖在线兜底。
+- **本地词库约 11.7 万词条**（单词约 3.1 万 + 词组约 8.6 万），覆盖日常、学术、技术、商务场景。极生僻词、未收录的长词组与最新专业术语仍依赖在线兜底。
 - 纯字母词才取词，因此不含数字键名、代码变量名中的下划线组合（如 `user_id` 会取到 `user` 与 `id`）。
 - 部分页面（`chrome://`、扩展商店）禁止注入内容脚本，无法使用。
 
@@ -307,21 +342,85 @@ v1.0.1 及之前用 `mouseover` 触发——但 `mouseover` 只在鼠标**跨过
 
 ## 词库说明
 
-本地查词为**两级结构**，优先命中前者：
+本地查词为**分层结构**，按下列优先级命中：
 
-| 层级 | 文件 | 词条数 | 特点 |
-|---|---|---|---|
-| 精选词库 | `dict.js` | 940 | 手工维护，释义精炼、词性准确，气泡标注 **「本地词库」** |
-| 扩展词库 | `dict-extra.js` | 30,000 | ECDICT 按 BNC/COCA 词频筛出，带音标，气泡标注 **「本地词库 · 扩展」** |
+| 优先级 | 层级 | 文件 | 词条数 | 气泡角标 | 特点 |
+|---|---|---|---|---|---|
+| 1 | 精选词库 | `dict.js` | 940 | **本地词库** | 手工维护，释义精炼、词性准确；**高于词组** |
+| 2 | 词组词库 | `dict-phrase.js` | 85,867 | **本地词库 · 词组** | 常用搭配与短语动词，只有中文释义、无音标 |
+| 3 | 扩展词库 | `dict-extra.js` | 30,000 | **本地词库 · 扩展** | ECDICT 按 BNC/COCA 词频筛出，带音标；**低于词组** |
 
-两级用**不同变量名**（`LOCAL_DICT` / `DICT_EXTRA`）声明，同键时精选词库优先，
-不会被机器生成的释义覆盖。查询走 `hasOwnProperty`，不会误命中原型链上的
-`constructor`、`toString` 等属性。
+### 分层优先规则（v1.3.0）
 
-**两个文件都由 Service Worker 通过 `importScripts` 加载**（顺序：`dict.js` → `dict-extra.js`
-→ `dict-lookup.js`，最后一个是查词实现，依赖前两者）。内容脚本不加载词库。
+当鼠标同时命中「单词」和「词组」时，按下列顺序裁决：
+
+1. 悬停词在**精选词库**里 → **直接返回单词释义**，不看词组
+   （例：悬停 `long`，即使处于 `in the long run` 中也显示单词「长的」）
+2. 否则**按候选由短到长**逐个尝试词组 → 命中即返回
+   （例：悬停 `figure`，候选 `figure out` 命中 → 显示「合计为；计算出；明白」）
+3. 词组都没命中 → **回落**到扩展词库单词
+   （例：悬停 `procurement`，无相关词组 → 显示「获得；采购」）
+4. 全都未收录 → 交给在线兜底通道
+
+> 为什么 core 单词要高于词组：`dict.js` 是手工维护的，释义质量与词性准确度都高于
+> 机器提取的词组；而 `dict-extra.js` 只是按词频机械筛选，释义常不如一条精准搭配。
+> 因此让 extra 让位给词组、core 不让位，是「质量优先」与「覆盖面优先」的折中。
+
+三级用**不同变量名**（`LOCAL_DICT` / `DICT_PHRASE` / `DICT_EXTRA`）声明。
+查询走 `hasOwnProperty`，不会误命中原型链上的 `constructor`、`toString` 等属性。
+
+**三个文件都由 Service Worker 通过 `importScripts` 加载**（顺序：`dict.js` → `dict-extra.js`
+→ `dict-phrase.js` → `dict-lookup.js`，最后一个是查词实现，依赖前三者）。内容脚本不加载词库。
 调整词库后需在 `chrome://extensions` **重新加载扩展**（后台会重新 importScripts），
 而**不必**刷新所有页面——这正是集中持有带来的额外好处。
+
+### 重新生成词组词库
+
+词组从 ECDICT 的 **SQLite 版**（`stardict` 表，340 万词条）提取，比 CSV 版信息更全
+（含 `collins` 柯林斯星级、`oxford` 牛津三千词标记，这两者 CSV 版没有）。
+
+```bash
+# 1. 下载 SQLite 版（约 216MB zip → 851MB stardict.db）
+#    从 GitHub Release 下载最快；raw.githubusercontent 极慢，jsdelivr 拒绝 >20MB 文件
+curl -L -o /tmp/ecdict/ecdict-sqlite.zip \
+  https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip
+cd /tmp/ecdict && unzip -o ecdict-sqlite.zip
+
+# 2. 生成 dict-phrase.js（含全部通路）
+python build-phrases.py
+
+# 3. 校验（形状 / 释义缺失 / 与单词库同名键）
+node check-phrase.js && node check-phrase-lookup.js
+```
+
+`build-phrases.py` 的提取逻辑（**两条通路**）：
+
+**通路 A · 有质量标记**（满足其一即可）：
+- 有音标 `phonetic`，**或**
+- 有柯林斯星级 `collins`，**或**
+- 有牛津三千标记 `oxford`
+
+> 注意是「或」不是「与」：`as soon as`、`according to`、`a bit` 恰好**没有音标**，
+> 但有 `collins`/`oxford` 标记，若要求「与」会全部漏掉。
+
+**通路 B · 无质量标记的常用搭配**（补齐 `out of the blue`、`a variety of` 这类）：
+- 无音标、无 collins、无 oxford
+- 且 **首段或末段是介词**（约 60 个介词构成的集合）
+- 且每段都落在「高频词表」（`bnc`/`frq` 排名前 20000）内
+- 且段数 ≤ 5、总长 5–40 字符
+
+> 「首/末段是介词」这个判据是试了四种后才确定的，前三种都被专业术语淹没：
+>
+> | 判据 | 筛出量 | 抽检结论 |
+> |---|---|---|
+> | 每段是真实单词 | 627,049 | ✗ 全是 `ab initio method` 这类专业术语 |
+> | 每段在高频词表内 | 717,828 | ✗ 仍是实词堆叠 |
+> | 含虚词 + 段数 ≤ 5 | 111,812 | △ 好转，仍混入 `ability to pay basis` |
+> | **首段或末段是介词** | **32,783** | **✓ 150 条抽检全合格** |
+>
+> 原理：英语搭配与短语动词几乎都以介词收尾或开头（`account for`、`abstain from`、
+> `accede to`、`abreast of`），而专业术语是名词短语、末段必为实词
+> （`abandoned coal pillar`），于是被自然排除。
 
 ### 重新生成扩展词库
 
@@ -360,4 +459,44 @@ newword: { t: "中文释义1；中文释义2", p: "n." },
 - `p` 词性，多词性用 `/` 分隔，如 `v./n.`
 
 文件末尾有自检逻辑，会自动剔除含数字等非法字符的键。
-`dict-extra.js` 由脚本生成，**不要手工编辑**——重新运行 `build-dict.js` 会覆盖。
+`dict-extra.js` 与 `dict-phrase.js` 由脚本生成，**不要手工编辑**——重新运行脚本会覆盖。
+
+---
+
+## 更新日志
+
+### v1.3.0 —— 词组支持
+
+**新增词组词库（85,867 条）**，从 ECDICT SQLite 版 + 短语动词表提取，去重后并入：
+
+- 悬停在 `figure out`、`out of the blue`、`a variety of`、`take advantage of` 等搭配上时，
+  自动识别**整条词组**并给出中文释义，角标显示「本地词库 · 词组」
+- 单词库不变（精选 940 + 扩展 30,000）；词条总数 **9.4 万 → 11.7 万**
+
+**新增分层优先策略**（三种结局均有真实浏览器验收覆盖）：
+
+| 情形 | 结果 | 例 |
+|---|---|---|
+| 悬停词在精选词库 | **core 单词胜出**，不看词组 | `long` → 「长的」（而非 `in the long run`） |
+| 悬停词只在扩展词库、且命中词组 | **词组胜出** | `figure` → `figure out`「合计为；计算出；明白」 |
+| 悬停词在扩展词库、无相关词组 | **回落 extra 单词** | `procurement` → 「获得；采购」 |
+
+**词组匹配按词数由短到长**，不做最长优先（保 `as soon as` 这类核心搭配的释义准确）。
+
+**内存**：词库源文本 3.0 MB → 6.2 MB，SW 堆 9.5 MB（实测不随标签页增长）。
+词组库是扁平结构 `{ 词组: { t: 释义 } }`，不存音标，因此内存效率高于同体积的单词库。
+
+**测试**：281 → **330 项**（8 个套件全绿）；`verify-browser.js` 真实 Chromium 验收 30 → **58 项**。
+新增 `check-phrase.js` / `check-phrase-lookup.js` 两个词库校验脚本。
+
+### v1.2.1 —— 在线超时抖动修复
+
+- 连字符合成词本地拆词（`decision-maker` / `real-time` / `mother-in-law`），整词查不到时自动拆段，不走网络
+- 在线失败自动静默重试一次，超时放宽到 2.5s/3s
+- 通道连续失败 2 次后冷却 120 秒，不再陪它耗到超时
+
+### v1.2.0 —— 词库归后台（架构调整）
+
+- 词库从 `content_scripts` 移到 Service Worker，`importScripts` 全局只持有一份
+- 内存从「随 frame 线性增长」变为**恒定**（100 frame 场景由 ≈ 879 MB 降到 8.8 MB）
+- 查词逻辑收敛到 `dict-lookup.js` 单一实现；popup 改走 `HT_DICT_INFO` 查询词条数

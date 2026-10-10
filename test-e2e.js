@@ -101,6 +101,9 @@ const dom = new JSDOM(
      <p id="p1">The efficiency of this approach is significantly important.</p>
      <p id="p2">Implementations were deployed and configurations validated.</p>
      <p id="p3">The procurement cost keeps depreciating, while efficiency improves.</p>
+     <p id="p4">We should insofar as possible abide by the rules, out of the blue.</p>
+     <p id="p5">A swimming pool and a nervous system, with exclusion zone markers.</p>
+     <p id="p6">Please look forward to it, and come up with a plan, as soon as possible.</p>
    </body></html>`,
   { pretendToBeVisual: true, url: "https://example.com/" }
 );
@@ -223,6 +226,33 @@ async function hoverWord(el, word) {
     bubbles: true, clientX: 100, clientY: 100
   }));
   await sleep(160); // 超过 hoverDelay(80ms)
+}
+
+// 悬停在词组中的某个词上（模拟用户把鼠标放在词组的第 N 个词）
+async function hoverPhraseWord(el, phrase, wordIndex) {
+  const node = findTextNode(el);
+  const base = node.nodeValue.indexOf(phrase);
+  if (base < 0) throw new Error("页面中找不到词组：" + phrase);
+  // 定位到指定词的中间位置
+  let off = base;
+  for (let i = 0; i < wordIndex; i++) {
+    const sp = node.nodeValue.indexOf(" ", off);
+    if (sp < 0) throw new Error("词组内找不到第 " + wordIndex + " 个词");
+    off = sp + 1;
+  }
+  // 必须把光标落在「字母」上：落在词尾空格上时 caretRangeFromPoint 会命中
+  // 前一个词，导致悬停位置和预期不符。
+  let p = off;
+  while (p < node.nodeValue.length && !/[A-Za-z]/.test(node.nodeValue[p])) p++;
+  const target = p + 1; // 词内第 2 个字符，稳定落在词中间
+  hoverTarget = { node: node, offset: target };
+  // 先收起当前气泡，避免读到上一个词的残留内容
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await sleep(20);
+  el.dispatchEvent(new window.MouseEvent("mousemove", {
+    bubbles: true, clientX: 100, clientY: 100
+  }));
+  await sleep(160);
 }
 
 function getBubble() {
@@ -357,6 +387,91 @@ function bubbleVisible() {
   check("精选词条角标不含「扩展」",
     !!effBadge && !effBadge.textContent.includes("扩展"),
     effBadge ? effBadge.textContent : "无角标");
+
+  hoverTarget = null;
+  document.body.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 300, clientY: 300 }));
+  await sleep(420);
+
+  // ---- 11. 词组查询路径（v1.3.0，分层优先）----
+  console.log("\n[词组] 悬停连续词组文本（分层优先：core 单词胜出 / extra 单词让位词组）");
+  const p4 = document.getElementById("p4");
+  const p5 = document.getElementById("p5");
+  const p6 = document.getElementById("p6");
+
+  // ------ A. 单词未收录 → 词组命中 ------
+  // insofar 不在单词词库，只能靠词组兜底
+  await hoverPhraseWord(p4, "insofar as possible", 0);
+  check("悬停 insofar 触发词组查询并命中", bubbleVisible() &&
+    bubbleText().includes("insofar"), bubbleText().slice(0, 90));
+  check("insofar as 角标标注「本地词库 · 词组」",
+    bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+  check("insofar as 显示中文释义",
+    /范围|限度/.test(bubbleText()), bubbleText().slice(0, 90));
+
+  // 悬停在词组的第二个词 as 上 —— as 是 core，按分层优先应返回单词 as
+  await hoverPhraseWord(p4, "insofar as possible", 1);
+  check("悬停 core 虚词 as 返回单词而非词组（分层优先）",
+    bubbleVisible() && !bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // ------ B. core 单词胜出 ------
+  // abide 在扩展词库（extra），但 abide by 是词组 → 词组应胜出
+  await hoverPhraseWord(p4, "abide by", 0);
+  check("extra 单词 abide 让位词组 abide by",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // out 在扩展词库（extra）→ 让位词组；最短候选 "out of" 先命中
+  // （"out of" 本身就是合法搭配，短优先规则下正确胜出）
+  await hoverPhraseWord(p4, "out of the blue", 0);
+  check("extra 单词 out 让位词组（命中 out of）",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // 悬停 blue（单词未收录）→ 命中完整的 out of the blue
+  await hoverPhraseWord(p4, "out of the blue", 3);
+  check("悬停 blue 命中完整词组 out of the blue",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+  check("out of the blue 释义为「突然」",
+    bubbleText().includes("突然"), bubbleText().slice(0, 90));
+
+  // the 是精选词条（core）→ 返回单词 the，不让位词组
+  await hoverPhraseWord(p4, "out of the blue", 2);
+  check("core 虚词 the 返回单词而非词组（分层优先）",
+    bubbleVisible() && !bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // ------ C. extra 单词让位词组 ------
+  // swimming 在扩展词库（extra）→ 让位词组 swimming pool
+  await hoverPhraseWord(p5, "A swimming pool", 1);
+  check("extra 单词 swimming 让位词组 swimming pool",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // pool 也在扩展词库（extra）→ 同样让位词组
+  await hoverPhraseWord(p5, "A swimming pool", 2);
+  check("extra 单词 pool 让位词组 swimming pool",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+  check("swimming pool 释义为「游泳池」",
+    bubbleText().includes("游泳池"), bubbleText().slice(0, 90));
+
+  // system 在精选词库（core）→ 返回单词 system
+  await hoverPhraseWord(p5, "a nervous system", 2);
+  check("core 单词 system 返回单词而非词组 nervous system",
+    bubbleVisible() && !bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // ------ D. look forward to ------
+  // look 是 core → 返回单词 look
+  await hoverPhraseWord(p6, "look forward to", 0);
+  check("core 单词 look 返回单词而非词组 look forward to",
+    bubbleVisible() && !bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+  check("词组扩展不跨越标点（气泡内容不含逗号）",
+    !bubbleText().includes(","), bubbleText().slice(0, 90));
+
+  // as 是 core → 返回单词 as
+  await hoverPhraseWord(p6, "as soon as", 0);
+  check("core 单词 as 返回单词而非词组 as soon as",
+    bubbleVisible() && !bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
+
+  // possible 在扩展词库（extra）→ 让位词组 as soon as possible
+  await hoverPhraseWord(p6, "as soon as possible", 3);
+  check("extra 单词 possible 让位词组 as soon as possible",
+    bubbleVisible() && bubbleText().includes("本地词库 · 词组"), bubbleText().slice(0, 90));
 
   hoverTarget = null;
   document.body.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 300, clientY: 300 }));
