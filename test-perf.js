@@ -279,8 +279,8 @@ function mmPlan(delay, ok = true) {
   const coreN = Object.keys(workerSandbox.LOCAL_DICT || {}).length;
   const extraN = Object.keys(workerSandbox.DICT_EXTRA || {}).length;
   console.log("\n[词库] 后台持有：精选 " + coreN + " 条 + 扩展 " + extraN + " 条 = " + (coreN + extraN) + " 条（全局 1 份）");
-  check("后台词库条目数与预期一致（940 + 30000）",
-    coreN === 940 && extraN === 30000, coreN + " + " + extraN);
+  check("后台词库条目数与预期一致（940 + 47370）",
+    coreN === 940 && extraN === 47370, coreN + " + " + extraN);
   check("离线查词走的是词库而非网络（无 fetch 调用）",
     api.lookupOffline("efficiency") && api.lookupOffline("efficiency").found === true);
 

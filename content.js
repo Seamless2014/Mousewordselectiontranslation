@@ -9,7 +9,7 @@
  *
  * v1.2.0 架构调整：本文件**不再包含词库**。
  *  改造前 dict.js / dict-extra.js 由 manifest 注入，而内容脚本是「每个 frame 一份
- *  独立 JS 环境」，于是每个标签页、每个 iframe 都要各自解析并持有一份 3 万词词库
+ *  独立 JS 环境」，于是每个标签页、每个 iframe 都要各自解析并持有一份词库
  *  （堆约 8.7 MB），20 个标签页 × 5 个 iframe 就是约 870 MB。
  *  现在词库由 service worker 全局持有一份，本文件只负责取词、请求、渲染。
  *  词形还原与词条组装也一并移到后台（dict-lookup.js），避免双份实现漂移。
@@ -26,7 +26,7 @@
   if (window.__hoverTranslateInjected) return;
   window.__hoverTranslateInjected = true;
 
-  const HT_VERSION = "1.3.0";
+  const HT_VERSION = "1.4.0";
 
   // 后台查词的超时保护：本地查词实测 1–3 ms，200 ms 已经非常宽松。
   // 设这个上限是为了应对「service worker 正在重建」等极端情况 ——

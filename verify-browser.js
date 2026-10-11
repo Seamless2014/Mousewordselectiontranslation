@@ -111,7 +111,7 @@ function startServer() {
   const SKIP_MEM = process.argv.includes("--no-memory");
 
   console.log(C.b("\n════════════════════════════════════════════════════════════"));
-  console.log(C.b(" hover-translate v1.3.0 真实 Chromium 验收"));
+  console.log(C.b(" hover-translate v1.4.0 真实 Chromium 验收"));
   console.log(C.b("════════════════════════════════════════════════════════════"));
   console.log(C.d("  Chromium : " + CHROMIUM));
   console.log(C.d("  扩展目录 : " + EXT_DIR));
@@ -200,9 +200,9 @@ function startServer() {
     ok("worker 里 lookupPhrase 可用", swProbe.hasLookupPhrase);
     ok("worker 里 buildLocalResult 可用", swProbe.hasBuildResult);
     ok("精选词库 940 条", swProbe.coreCount === 940, "实际 " + swProbe.coreCount);
-    ok("扩展词库 30000 条", swProbe.extraCount === 30000, "实际 " + swProbe.extraCount);
+    ok("扩展词库 47370 条", swProbe.extraCount === 47370, "实际 " + swProbe.extraCount);
     ok("词组词库 ≥ 8.5 万条", swProbe.phraseCount >= 85000, "实际 " + swProbe.phraseCount);
-    ok("后台版本号 1.3.0", swProbe.version === "1.3.0", "实际 " + swProbe.version);
+    ok("后台版本号 1.4.0", swProbe.version === "1.4.0", "实际 " + swProbe.version);
 
     // ═══════════════ 第 2 步：真实查词（不经过页面，直接打消息契约） ═══════════════
     sec("第 2 步 · HT_LOOKUP / HT_DICT_INFO 消息契约（真实 runtime）");
@@ -333,7 +333,7 @@ function startServer() {
     const injectedLog = consoleLogs.find(l => /悬停取词翻译.*已加载/.test(l));
     const dictLog = consoleLogs.find(l => /离线词库已就绪/.test(l));
     ok("content script 已注入并打印加载日志", !!injectedLog, injectedLog || "未捕获");
-    ok("打印「离线词库已就绪」并含正确词条数", !!dictLog && /940/.test(dictLog) && /30000/.test(dictLog), dictLog || "未捕获");
+    ok("打印「离线词库已就绪」并含正确词条数", !!dictLog && /940/.test(dictLog) && /47370/.test(dictLog), dictLog || "未捕获");
 
     // 真的悬停到目标词上，看气泡
     //

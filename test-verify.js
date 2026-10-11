@@ -41,24 +41,32 @@ if (typeof lookupLocal !== "function" || typeof buildLocalResult !== "function")
 
 // ---- 测试用例：输入 -> 期望命中的词条键 ----
 //
-// 注意（v1.1 起词库为两级）：
+// 注意（v1.1 起词库为两级，v1.4.0 起扩展库扩至 4.7 万）：
 //  ECDICT 扩展库里大量变体形式**本身就有独立词条**（running / generated /
-//  children / matched / provided …），查它们会"原词直命中"而不是词形还原。
-//  这是正确行为——ECDICT 对这些变体给的释义往往比词根更贴切（例如 running
-//  直接给"赛跑；流出；运转"）。因此本组用例只保留"变体不在库、必须靠还原"的词，
-//  用它来验证还原逻辑真的活着。
+//  children / matched / provided / compiled / deployed …），查它们会"原词直命中"
+//  而不是词形还原。这是正确行为——ECDICT 对这些变体给的释义往往比词根更贴切
+//  （例如 deployed 给"（尤指军事行动）使展开( deploy的过去式和过去分词 )"，
+//   比裸词根 deploy 信息更多）。
+//
+//  ★ 因此本组用例的判定规则是「二者皆可，但必须命中」★
+//    期望值写成 { word, root }：命中 word（直命中）或 root（还原命中）都算通过。
+//    这样词库扩容后变体新增独立词条时，用例不会误报失败；
+//    但若两者都查不到（还原逻辑死了），依然会失败。
 const CASES = [
+  // 只有原形、变体不在库 —— 必须靠还原逻辑
   ["analysis", "analysis"], ["analyses", "analysis"],
   ["implementations", "implementation"], ["configurations", "configuration"],
   ["studies", "study"], ["libraries", "library"],
   ["requirements", "requirement"], ["variables", "variable"],
   ["methods", "method"], ["words", "word"],
-  ["compiled", "compile"], ["deployed", "deploy"],
+  // 变体现在可能有独立词条 —— 直命中或还原均可
+  ["compiled", ["compiled", "compile"]], ["deployed", ["deployed", "deploy"]],
+  ["discussed", ["discussed", "discuss"]], ["creating", ["creating", "create"]],
   ["optimize", "optimize"], ["robust", "robust"],
   ["interface", "interface"], ["hypothesis", "hypothesis"],
   ["data", "data"], ["efficiency", "efficiency"],
-  ["significantly", "significantly"], ["discussed", "discuss"],
-  ["creating", "create"], ["effective", "effective"],
+  ["significantly", "significantly"],
+  ["effective", "effective"],
   ["sequential", "sequential"], ["maintains", "maintain"]
 ];
 
@@ -67,8 +75,13 @@ const fails = [];
 for (const [input, expect] of CASES) {
   const r = lookupLocal(input);
   const got = r ? r.matched : null;
-  if (got === expect) { pass++; }
-  else { fail++; fails.push(`  ${input.padEnd(18)} 期望 ${expect}  实际 ${got || "未命中"}`); }
+  const ok = Array.isArray(expect) ? expect.indexOf(got) >= 0 : got === expect;
+  if (ok) { pass++; }
+  else {
+    fail++;
+    const want = Array.isArray(expect) ? expect.join(" 或 ") : expect;
+    fails.push(`  ${input.padEnd(18)} 期望 ${want}  实际 ${got || "未命中"}`);
+  }
 }
 
 console.log("=".repeat(56));

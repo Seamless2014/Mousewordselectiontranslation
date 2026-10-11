@@ -8,7 +8,7 @@
  *
  * 为什么词库放在后台（v1.2.0 架构调整）：
  *  改造前词库由 content_scripts 注入，而内容脚本是「每个 frame 一份独立 JS 环境」，
- *  于是每开一个标签页、每个 iframe 都要各自解析并持有一份 3 万词词库（堆约 8.7 MB）。
+ *  于是每开一个标签页、每个 iframe 都要各自解析并持有一份词库（堆约 34 MB）。
  *  实测 20 个标签页 × 平均 5 个 iframe ≈ 100 份 ≈ 870 MB，且同一份 2.1 MB 脚本被
  *  重复解析 100 次。改为后台集中持有后，内存恒定 8.7 MB，与标签页数量无关。
  *  代价是每次查词多一次消息往返（实测 1–3 ms，远小于 hoverDelay 的 320 ms）。
@@ -33,7 +33,7 @@
 // 注意：四个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
 importScripts("dict.js", "dict-extra.js", "dict-phrase.js", "dict-lookup.js");
 
-const HT_BG_VERSION = "1.3.0";
+const HT_BG_VERSION = "1.4.0";
 
 // dict.js / dict-extra.js / dict-phrase.js 末尾都有「仅保留合法键」的自检，
 // 这里再兜一层：确认词库真的可用，否则把查词请求直接判为未命中（走在线兜底）。
