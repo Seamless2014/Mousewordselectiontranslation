@@ -136,6 +136,8 @@ function clearSelection() { mockSel = null; }
 
 // ---- 模拟 chrome ----
 const storageState = { enabled: true, onlineFallback: false, showPhonetic: true, hoverDelay: 80, showBall: true };
+// 悬浮球拖动后的位置落在 content 侧的 chrome.storage.local
+const contentLocalState = {};
 const storageListeners = [];
 const onMessageListeners = [];
 const sentToBackground = [];
@@ -159,6 +161,23 @@ const chromeMock = {
     sync: {
       get(defaults, cb) { cb(Object.assign({}, defaults, storageState)); },
       set(patch, cb) { Object.assign(storageState, patch); cb && cb(); }
+    },
+    // 悬浮球位置读写走 local 区
+    local: {
+      get(key, cb) {
+        const out = {};
+        if (typeof key === "string") {
+          if (contentLocalState[key] !== undefined) out[key] = contentLocalState[key];
+        } else if (Array.isArray(key)) {
+          key.forEach(k => { if (contentLocalState[k] !== undefined) out[k] = contentLocalState[k]; });
+        } else if (key && typeof key === "object") {
+          Object.keys(key).forEach(k => {
+            out[k] = contentLocalState[k] !== undefined ? contentLocalState[k] : key[k];
+          });
+        }
+        cb && cb(out);
+      },
+      set(patch, cb) { Object.assign(contentLocalState, patch); cb && cb(); }
     },
     onChanged: { addListener(fn) { storageListeners.push(fn); } }
   }
@@ -547,6 +566,103 @@ const bubbleText = () => {
   check("G4 清空后 HT_GET_WORDS 返回空数组",
     g4Get && g4Get.words && g4Get.words.length === 0,
     "实际：" + JSON.stringify(g4Get));
+
+  // ---------- 路径 H：悬浮球拖拽定位 ----------
+  console.log("\n[路径 H] 悬浮球拖拽定位 + 位置持久化");
+  // 确保总开关开、悬浮球显示、站点未屏蔽
+  storageListeners.forEach(fn => fn({ enabled: { newValue: true } }, "sync"));
+  storageListeners.forEach(fn => fn({ showBall: { newValue: true } }, "sync"));
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: [] } }, "sync"));
+  await sleep(30);
+
+  const hBall = document.querySelector(".ht-ball");
+  check("H0 悬浮球存在（拖拽前置条件）", !!hBall);
+  if (hBall) {
+    const pev = (type, x, y) =>
+      hBall.dispatchEvent(new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+
+    // H0：初始未拖动过 → 无 inline 定位（沿用 CSS 默认右下角）
+    check("H0 初始未拖动时无 inline left/top",
+      hBall.style.left === "" && hBall.style.top === "",
+      "left=" + JSON.stringify(hBall.style.left));
+
+    // H1：拖动 (100,100) → (160,140)：写入 left/top 并落盘
+    //     注：jsdom 里 getBoundingClientRect 全为 0，故起点 left/top 从 0 算起
+    pev("pointerdown", 100, 100);
+    pev("pointermove", 160, 140);
+    pev("pointerup", 160, 140);
+    await sleep(20);
+    check("H1 拖动后设置 inline left=60px", hBall.style.left === "60px",
+      "left=" + JSON.stringify(hBall.style.left));
+    check("H1 拖动后设置 inline top=40px", hBall.style.top === "40px",
+      "top=" + JSON.stringify(hBall.style.top));
+    check("H1 改用 left/top 并释放 right/bottom",
+      hBall.style.right === "auto" && hBall.style.bottom === "auto",
+      "right=" + JSON.stringify(hBall.style.right) + " bottom=" + JSON.stringify(hBall.style.bottom));
+    check("H1 位置已落盘到 storage.local.ht_ball_pos",
+      contentLocalState.ht_ball_pos &&
+      contentLocalState.ht_ball_pos.left === 60 && contentLocalState.ht_ball_pos.top === 40,
+      "实际：" + JSON.stringify(contentLocalState.ht_ball_pos));
+    check("H1 拖动结束后移除拖动中样式类", !hBall.classList.contains("ht-ball-dragging"),
+      "class=" + hBall.className);
+
+    // H2：拖拽尾随的 click 不应切换开关
+    check("H2 拖动后开关仍为开启态", hBall.classList.contains("ht-ball-on"),
+      "class=" + hBall.className);
+    hBall.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(20);
+    check("H2 拖拽后的 click 被抑制，开关不变", hBall.classList.contains("ht-ball-on"),
+      "class=" + hBall.className);
+
+    // H3：普通点击（无位移）仍能切换开关
+    pev("pointerdown", 200, 200);
+    pev("pointerup", 200, 200);
+    hBall.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(20);
+    check("H3 无拖动的点击仍切换为关闭态", hBall.classList.contains("ht-ball-off"),
+      "class=" + hBall.className);
+    pev("pointerdown", 200, 200);
+    pev("pointerup", 200, 200);
+    hBall.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(20);
+    check("H3 再次点击切回开启态", hBall.classList.contains("ht-ball-on"),
+      "class=" + hBall.className);
+
+    // H4：位移 ≤ 4px 视为手抖，仍按点击处理
+    pev("pointerdown", 300, 300);
+    pev("pointermove", 302, 301);
+    pev("pointerup", 302, 301);
+    hBall.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(20);
+    check("H4 位移≤4px 不算拖动，点击仍生效（切为关闭态）",
+      hBall.classList.contains("ht-ball-off"), "class=" + hBall.className);
+    pev("pointerdown", 300, 300);
+    pev("pointerup", 300, 300);
+    hBall.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(20);
+
+    // H5：越界拖动被夹紧在视口内（jsdom 视口 1024×768，球 38px，边距 4px）
+    pev("pointerdown", 500, 500);
+    pev("pointermove", 5000, 5000);
+    pev("pointerup", 5000, 5000);
+    await sleep(20);
+    check("H5 越界拖动 left 被夹紧为 982px", hBall.style.left === "982px",
+      "left=" + JSON.stringify(hBall.style.left));
+    check("H5 越界拖动 top 被夹紧为 726px", hBall.style.top === "726px",
+      "top=" + JSON.stringify(hBall.style.top));
+
+    // H6：隐藏再显示悬浮球 → 位置被还原
+    storageListeners.forEach(fn => fn({ showBall: { newValue: false } }, "sync"));
+    await sleep(30);
+    check("H6 showBall=false 后悬浮球被移除", !document.querySelector(".ht-ball"));
+    storageListeners.forEach(fn => fn({ showBall: { newValue: true } }, "sync"));
+    await sleep(30);
+    const hBall2 = document.querySelector(".ht-ball");
+    check("H6 showBall=true 后悬浮球恢复", !!hBall2);
+    check("H6 恢复的悬浮球还原上次拖动位置",
+      hBall2 && hBall2.style.left === "982px" && hBall2.style.top === "726px",
+      hBall2 ? ("left=" + JSON.stringify(hBall2.style.left) + " top=" + JSON.stringify(hBall2.style.top)) : "无悬浮球");
+  }
 
   console.log(log.join("\n"));
   console.log("\n通过 " + pass + " / " + (pass + fail));

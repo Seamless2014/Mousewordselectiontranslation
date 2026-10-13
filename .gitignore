@@ -19,3 +19,6 @@ _*.js
 # 验收脚本的生成物（每次运行结果不同，仅本地查看见 verify-browser.js / verify-v150.js）
 verify-browser-result.json
 verify-v150-result.json
+
+# Trae IDE 临时目录
+.trae-html-share-packages/

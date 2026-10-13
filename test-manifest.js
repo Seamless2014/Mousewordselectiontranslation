@@ -176,6 +176,7 @@ if (fs.existsSync(lookupPath)) {
 
 // 8. content.js 已卸下词库，改为消息查词
 const contentSrc = fs.readFileSync(path.join(DIR, "content.js"), "utf8");
+const contentCss = fs.readFileSync(path.join(DIR, "content.css"), "utf8");
 // 剥掉注释再断言：注释里提到词库变量名是正常的历史说明，不算引用。
 // 这里用逐行剥离 // 与 /* */ 的方式，避免误判。
 function stripComments(src) {
@@ -200,6 +201,19 @@ check("content.js 渲染发音按钮（.ht-tts）",
 check("content.js 监听 mouseup 触发划词查询（v1.5.0）",
   /["']mouseup["']/.test(contentCode) && /querySelection/.test(contentCode),
   "需绑定 mouseup + querySelection 函数");
+
+// 悬浮球可手动拖动调整位置，位置持久化到 storage.local
+check("content.js 绑定悬浮球拖拽（pointerdown/pointermove）",
+  /["']pointerdown["']/.test(contentCode) && /["']pointermove["']/.test(contentCode),
+  "需绑定 pointerdown + pointermove 事件");
+check("content.js 拖拽位置持久化（saveBallPos + ht_ball_pos）",
+  /saveBallPos/.test(contentCode) && /["']ht_ball_pos["']/.test(contentCode),
+  "需落盘到 storage.local.ht_ball_pos");
+check("content.js 拖拽期间不误触发取词（ballDragging 守卫）",
+  /ballDragging/.test(contentCode), "需用 ballDragging 守卫 onMouseMove");
+check("content.css 悬浮球支持拖拽（touch-action + ht-ball-dragging）",
+  /touch-action:\s*none/.test(contentCss) && /ht-ball-dragging/.test(contentCss),
+  "需含 touch-action:none 与 .ht-ball-dragging 拖动中样式");
 
 // content.js 不应再引用已删除的 HT_SET_ENABLED
 check("无残留 HT_SET_ENABLED 消息类型", !/HT_SET_ENABLED/.test(contentSrc) &&

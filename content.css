@@ -197,6 +197,7 @@
   line-height: 1 !important;
   cursor: pointer !important;
   user-select: none !important;
+  touch-action: none !important;
   transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease !important;
 }
 
@@ -206,6 +207,13 @@
 
 .ht-ball:active {
   transform: scale(0.96) !important;
+}
+
+/* 拖动中：去掉过渡与悬停放大，光标改为抓手 */
+.ht-ball.ht-ball-dragging {
+  transition: none !important;
+  transform: none !important;
+  cursor: grabbing !important;
 }
 
 .ht-ball-on {

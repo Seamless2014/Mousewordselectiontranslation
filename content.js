@@ -54,6 +54,9 @@
     hoverDelay: 320,        // 悬停多久才触发（毫秒）
     bubble: null,           // 气泡 DOM
     ball: null,             // 悬浮球 DOM
+    ballPos: null,           // 悬浮球已保存的位置 {left, top}（px）；null = 用默认右下角
+    ballDragging: false,     // 是否正在拖动悬浮球
+    ballSuppressClick: false, // 拖拽结束后抑制紧随的 click，避免误切成开关
     timer: null,            // 悬停延迟计时器
     hideTimer: null,        // 隐藏计时器
     currentWord: null,      // 当前正在展示的词
@@ -719,6 +722,8 @@
   function onMouseMove(e) {
     state.mouseX = e.clientX;
     state.mouseY = e.clientY;
+    // 拖动悬浮球期间不取词（指针快速甩动时可能短暂脱离小球，这里兜底）
+    if (state.ballDragging) return;
     // 气泡可见时实时跟随
     if (state.bubble && state.bubble.classList.contains("ht-show")) {
       positionBubble(state.bubble);
@@ -873,22 +878,137 @@
   }
 
   // ---------- 悬浮球 ----------
+  // 位置持久化：键存 chrome.storage.local —— 悬浮球坐标属于「本机 UI 布局」，
+  // 不占 sync 配额，也不去碰 popup 里那 8 个 sync 开关键。
+  // 初始无记录时沿用 CSS 里的右下角默认位置；用户拖动过一次后，记住坐标，
+  // 之后每次打开页面（含新建标签页）都还原到用户放的地方。
+  const BALL_POS_KEY = "ht_ball_pos";
+  const BALL_EDGE_MARGIN = 4;   // 距视口边缘最小留白（px），防止贴边或跑出屏幕
+
+  /** 把坐标夹在视口内：窗口变小后悬浮球不会被挤出可见区域。 */
+  function clampBallPos(left, top, size) {
+    const w = window.innerWidth || 0;
+    const h = window.innerHeight || 0;
+    const maxLeft = Math.max(BALL_EDGE_MARGIN, w - size - BALL_EDGE_MARGIN);
+    const maxTop = Math.max(BALL_EDGE_MARGIN, h - size - BALL_EDGE_MARGIN);
+    return {
+      left: Math.min(Math.max(BALL_EDGE_MARGIN, left), maxLeft),
+      top: Math.min(Math.max(BALL_EDGE_MARGIN, top), maxTop)
+    };
+  }
+
+  /**
+   * 应用悬浮球位置。改用 left/top 定位，并用 !important 覆盖 CSS 里的
+   * right/bottom —— 那两个属性在 content.css 中带 !important，普通赋值盖不掉。
+   */
+  function applyBallPos(pos) {
+    if (!state.ball || !pos) return;
+    const size = state.ball.offsetWidth || 38;
+    const c = clampBallPos(pos.left, pos.top, size);
+    state.ball.style.setProperty("left", c.left + "px", "important");
+    state.ball.style.setProperty("top", c.top + "px", "important");
+    state.ball.style.setProperty("right", "auto", "important");
+    state.ball.style.setProperty("bottom", "auto", "important");
+    state.ballPos = c;
+  }
+
+  /** 读取上次保存的位置；无记录则保持默认（右下角），不做任何改动。 */
+  function loadBallPos() {
+    try {
+      chrome.storage.local.get(BALL_POS_KEY, d => {
+        if (chrome.runtime.lastError) return;
+        const p = d && d[BALL_POS_KEY];
+        if (p && typeof p.left === "number" && typeof p.top === "number") applyBallPos(p);
+      });
+    } catch (_) {}
+  }
+
+  /** 落盘位置；任何异常都不打断主流程。 */
+  function saveBallPos(pos) {
+    try {
+      const patch = {};
+      patch[BALL_POS_KEY] = pos;
+      chrome.storage.local.set(patch, () => { void chrome.runtime.lastError; });
+    } catch (_) {}
+  }
+
+  /**
+   * 给悬浮球绑定拖拽。
+   *
+   * 用 pointer 事件统一鼠标 / 触摸 / 笔。位移超过 4px 才算拖动，否则仍按点击
+   * 处理 —— 点按开关与拖动位置因此可以共存。
+   * setPointerCapture 让指针移出小球后仍持续收到事件；try/catch 兼容不支持该
+   * API 的环境（例如 jsdom 测试）。
+   */
+  function bindBallDrag(el) {
+    let dragging = false, moved = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+    el.addEventListener("pointerdown", ev => {
+      if (ev.button !== 0) return;          // 只响应左键 / 触摸 / 笔
+      const rect = el.getBoundingClientRect();
+      dragging = true;
+      moved = false;
+      state.ballDragging = true;
+      state.ballSuppressClick = false;      // 新一次交互，清掉上一轮的抑制标记
+      startX = ev.clientX;
+      startY = ev.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      try { el.setPointerCapture(ev.pointerId); } catch (_) {}
+    });
+
+    el.addEventListener("pointermove", ev => {
+      if (!dragging) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved) {
+        if (Math.abs(dx) + Math.abs(dy) <= 4) return;  // 手抖，仍算点击
+        moved = true;
+        el.classList.add("ht-ball-dragging");
+        hideBubble();                       // 拖动时不保留旧气泡
+      }
+      applyBallPos({ left: startLeft + dx, top: startTop + dy });
+      ev.preventDefault();                  // 拖动中不选中页面文本
+    });
+
+    function endDrag(ev) {
+      if (!dragging) return;
+      dragging = false;
+      state.ballDragging = false;
+      el.classList.remove("ht-ball-dragging");
+      try { el.releasePointerCapture(ev.pointerId); } catch (_) {}
+      if (moved) {
+        state.ballSuppressClick = true;     // 这次是拖动，紧随的 click 不算开关
+        if (state.ballPos) saveBallPos(state.ballPos);
+      }
+    }
+    el.addEventListener("pointerup", endDrag);
+    el.addEventListener("pointercancel", endDrag);
+  }
+
   function ensureBall() {
     if (state.ball && document.body.contains(state.ball)) return state.ball;
     const el = document.createElement("div");
     el.className = "ht-ball";
     el.setAttribute("data-ht-owner", "1");
-    el.title = "悬停取词翻译：点击开启/关闭（Alt+Shift+T）";
+    el.title = "悬停取词翻译：点击开启/关闭，可拖动调整位置（Alt+Shift+T）";
     el.addEventListener("click", ev => {
       ev.preventDefault();
       ev.stopPropagation();
+      // 刚刚拖动过：这次点击只是拖拽的尾巴，不切换开关
+      if (state.ballSuppressClick) { state.ballSuppressClick = false; return; }
       setEnabled(!state.enabled, true);
     });
     // 悬浮球自身不触发取词
     el.addEventListener("mouseover", ev => ev.stopPropagation());
+    bindBallDrag(el);
     document.body.appendChild(el);
     state.ball = el;
     updateBall();
+    // 已有保存位置就还原；没有则读取一次（首次注入时），读不到就保持 CSS 默认
+    if (state.ballPos) applyBallPos(state.ballPos);
+    else loadBallPos();
     return el;
   }
 
@@ -1033,6 +1153,10 @@
     document.addEventListener("scroll", onScroll, true);
     document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("blur", hideBubble);
+    // 窗口尺寸变化后重新夹紧悬浮球位置，避免缩窗后小球被挤出可见区域
+    window.addEventListener("resize", () => {
+      if (state.ballPos) applyBallPos(state.ballPos);
+    }, { passive: true });
 
     // 加载成功标记：用户可在控制台（F12）确认脚本已注入
     try {

@@ -384,6 +384,86 @@ function startServer() {
     const bBack = await hoverWord("#p2", "running");
     ok("移出黑名单后气泡恢复", !!bBack && bBack.visible, bBack ? bBack.text.slice(0, 40) : "无气泡");
 
+    // ────────── 8. 悬浮球拖拽真机验证 ──────────
+    sec("第 8 步 · 悬浮球拖拽定位（真实鼠标拖动，非模拟）");
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
+
+    const ballBefore = await page.evaluate(() => {
+      const b = document.querySelector(".ht-ball");
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return {
+        cx: r.left + r.width / 2, cy: r.top + r.height / 2,
+        inlineLeft: b.style.left, inlineTop: b.style.top,
+        cls: b.className
+      };
+    });
+    ok("拖拽前悬浮球存在", !!ballBefore);
+    ok("拖拽前无 inline 定位（沿用默认右下角）",
+      !!ballBefore && ballBefore.inlineLeft === "" && ballBefore.inlineTop === "",
+      ballBefore ? "left=" + JSON.stringify(ballBefore.inlineLeft) : "无悬浮球");
+    ok("拖拽前开关为开启态", !!ballBefore && /ht-ball-on/.test(ballBefore.cls),
+      ballBefore ? ballBefore.cls : "无悬浮球");
+
+    // 真实拖拽：按住球心 → 拖到 (300,220) → 松开
+    const dragTargetX = 300, dragTargetY = 220;
+    if (ballBefore) {
+      await page.mouse.move(ballBefore.cx, ballBefore.cy, { steps: 4 });
+      await page.mouse.down();
+      await page.mouse.move(dragTargetX, dragTargetY, { steps: 14 });
+      await page.mouse.up();
+      await page.waitForTimeout(400);
+    }
+
+    const ballAfter = await page.evaluate(() => {
+      const b = document.querySelector(".ht-ball");
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return {
+        cx: r.left + r.width / 2, cy: r.top + r.height / 2,
+        inlineLeft: b.style.left, inlineTop: b.style.top,
+        right: b.style.right, bottom: b.style.bottom,
+        cls: b.className
+      };
+    });
+    ok("拖动后悬浮球产生 inline left/top 定位",
+      !!ballAfter && ballAfter.inlineLeft !== "" && ballAfter.inlineTop !== "",
+      ballAfter ? "left=" + JSON.stringify(ballAfter.inlineLeft) + " top=" + JSON.stringify(ballAfter.inlineTop) : "无悬浮球");
+    ok("拖动后 right/bottom 被释放为 auto",
+      !!ballAfter && ballAfter.right === "auto" && ballAfter.bottom === "auto",
+      ballAfter ? "right=" + JSON.stringify(ballAfter.right) + " bottom=" + JSON.stringify(ballAfter.bottom) : "无");
+    ok("悬浮球中心真实移动到鼠标落点（±8px）",
+      !!ballAfter && Math.abs(ballAfter.cx - dragTargetX) <= 8 && Math.abs(ballAfter.cy - dragTargetY) <= 8,
+      ballAfter ? ("落点 (" + Math.round(ballAfter.cx) + "," + Math.round(ballAfter.cy) + ") 目标 (" + dragTargetX + "," + dragTargetY + ")") : "无");
+    ok("拖动不误切开关（仍为开启态）",
+      !!ballAfter && /ht-ball-on/.test(ballAfter.cls), ballAfter ? ballAfter.cls : "无");
+
+    // 落盘校验：SW 侧读真实 storage.local
+    const ballPosStored = await sw.evaluate(() => new Promise(resolve => {
+      chrome.storage.local.get("ht_ball_pos", d => resolve(d ? d.ht_ball_pos : null));
+    }));
+    ok("拖动位置已落盘到 storage.local.ht_ball_pos",
+      !!ballPosStored && typeof ballPosStored.left === "number" && typeof ballPosStored.top === "number",
+      JSON.stringify(ballPosStored));
+
+    // 刷新页面 → 位置真实还原（这是持久化是否生效的硬判据）
+    await page.goto(TEST_URL, { waitUntil: "load" });
+    await page.waitForTimeout(1200);
+    const ballReload = await page.evaluate(() => {
+      const b = document.querySelector(".ht-ball");
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { cx: r.left + r.width / 2, cy: r.top + r.height / 2,
+               inlineLeft: b.style.left, inlineTop: b.style.top };
+    });
+    ok("刷新后悬浮球仍在拖动后的位置（位置真实持久化）",
+      !!ballReload && Math.abs(ballReload.cx - dragTargetX) <= 8 && Math.abs(ballReload.cy - dragTargetY) <= 8,
+      ballReload ? ("刷新后 (" + Math.round(ballReload.cx) + "," + Math.round(ballReload.cy) + ")") : "无悬浮球");
+
+    // 收尾：清掉保存位置，避免污染后续手工验证
+    await sw.evaluate(() => new Promise(resolve => chrome.storage.local.remove("ht_ball_pos", resolve)));
+
     // ────────── 汇总 ──────────
     sec("验证汇总");
     console.log("  扩展 ID : " + extId);
