@@ -141,6 +141,167 @@
   .status.show { display: block; }
   .status.info { color: #2b6cb0; background: #eaf2fd; }
   .status.warn { color: #8a5a00; background: #fff6e2; }
+
+  /* 站点黑名单按钮 */
+  .btn {
+    padding: 5px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    color: #fff;
+    background: #4a8cff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background .15s;
+    flex: 0 0 auto;
+    outline: none;
+  }
+  .btn:hover { background: #3a7aef; }
+  .btn:active { background: #2e6ae0; }
+  .btn.disabled {
+    color: #8b93a2;
+    background: #e9ebef;
+    cursor: default;
+  }
+
+  /* 黑名单列表 */
+  .sites {
+    max-height: 180px;
+    overflow-y: auto;
+    border-top: 1px solid #f1f2f4;
+  }
+  .sites-hd {
+    padding: 9px 16px 4px;
+    font-size: 11px;
+    color: #8b93a2;
+    letter-spacing: .3px;
+  }
+  .site-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 16px;
+    font-size: 12px;
+  }
+  .site-item .name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #1f2328;
+  }
+  .site-item .del {
+    flex: 0 0 auto;
+    color: #d05050;
+    cursor: pointer;
+    font-size: 11px;
+    user-select: none;
+  }
+  .site-item .del:hover { color: #b03838; }
+  .sites-empty {
+    padding: 4px 16px 10px;
+    font-size: 11px;
+    color: #b0b5bd;
+  }
+
+  /* 生词本面板（v1.5.0）*/
+  .words-panel {
+    border-top: 1px solid #f1f2f4;
+  }
+  .words-hd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px 6px;
+  }
+  .words-title { font-size: 13px; font-weight: 600; color: #1f2328; }
+  .words-count {
+    font-size: 11px;
+    color: #8b93a2;
+    background: #f1f2f4;
+    padding: 1px 7px;
+    border-radius: 9px;
+  }
+  .words-actions { margin-left: auto; display: flex; gap: 6px; }
+  .mini-btn {
+    padding: 3px 9px;
+    font-family: inherit;
+    font-size: 11px;
+    color: #4c5158;
+    background: #f4f5f7;
+    border: 1px solid #e3e5e9;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all .15s;
+    outline: none;
+  }
+  .mini-btn:hover { background: #eceef1; border-color: #d5d8dd; }
+  .mini-btn:active { background: #e3e5e9; }
+  .mini-btn.danger { color: #d05050; }
+  .mini-btn.danger:hover { background: #fff0f0; border-color: #f5c6c6; }
+  .words-hint {
+    padding: 0 16px 6px;
+    font-size: 10.5px;
+    color: #b0b5bd;
+  }
+  .word-list {
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 0 0 4px;
+  }
+  .word-item {
+    padding: 7px 16px;
+    border-top: 1px solid #f6f7f8;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .word-item:hover { background: #fafbfc; }
+  .word-item .w-row1 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .word-item .w-word {
+    font-weight: 600;
+    color: #1f2328;
+    flex: 0 0 auto;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .word-item .w-phon {
+    font-size: 10.5px;
+    color: #8b93a2;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .word-item .w-del {
+    margin-left: auto;
+    color: #d05050;
+    cursor: pointer;
+    font-size: 10.5px;
+    user-select: none;
+    flex: 0 0 auto;
+  }
+  .word-item .w-del:hover { color: #b03838; }
+  .word-item .w-plain {
+    color: #4c5158;
+    margin-top: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .words-empty {
+    padding: 10px 16px 14px;
+    font-size: 11px;
+    color: #b0b5bd;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -166,9 +327,25 @@
     <div class="row">
       <div class="txt">
         <div class="label">显示音标</div>
-        <div class="hint">在线查询时附带显示英文音标。</div>
+        <div class="hint">本地扩展词库自带音标；在线结果暂不含音标。</div>
       </div>
       <div class="tsw on" id="phonetic"></div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">显示发音按钮</div>
+        <div class="hint">气泡单词旁显示小喇叭，点击朗读（使用浏览器内置 TTS 引擎）。</div>
+      </div>
+      <div class="tsw on" id="tts"></div>
+    </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">启用划词查询</div>
+        <div class="hint">双击单词或拖选文本时自动查询并显示释义（划词位置不受站点黑名单限制）。</div>
+      </div>
+      <div class="tsw on" id="selection"></div>
     </div>
 
     <div class="row">
@@ -197,6 +374,32 @@
       </div>
       <span id="dictCount" style="font-size:12px;color:#4a8cff;font-weight:600;">—</span>
     </div>
+
+    <div class="row">
+      <div class="txt">
+        <div class="label">在此站点停用</div>
+        <div class="hint" id="disableSiteHint">当前站点不再自动弹释义。</div>
+      </div>
+      <button class="btn" id="disableSiteBtn">停用</button>
+    </div>
+  </div>
+
+  <!-- 站点黑名单列表 -->
+  <div class="sites" id="siteList"></div>
+
+  <!-- 生词本（v1.5.0）：查词命中后由后台落到 storage.local.ht_history -->
+  <div class="words-panel">
+    <div class="words-hd">
+      <span class="words-title">生词本</span>
+      <span class="words-count" id="wordsCount">—</span>
+      <span class="words-actions">
+        <button class="mini-btn" id="refreshWordsBtn" title="刷新">刷新</button>
+        <button class="mini-btn" id="exportWordsBtn" title="导出 CSV 文件">导出</button>
+        <button class="mini-btn danger" id="clearWordsBtn" title="清空全部">清空</button>
+      </span>
+    </div>
+    <div class="words-hint" id="wordsHint">查词命中后自动收录，仅本地存储，不上传任何服务器。</div>
+    <div class="word-list" id="wordList"></div>
   </div>
 
   <div class="ft">
@@ -205,7 +408,7 @@
   </div>
 
   <!-- 注意：popup 不再引入 dict.js / dict-extra.js / dict-phrase.js。
-       v1.2.0 起词库由 service worker 统一持有（避免每个上下文各存一份 2.1 MB），
+       v1.2.0 起词库由 service worker 统一持有（避免每个上下文各存一份 6.2 MB），
        v1.3.0 起新增词组词库，v1.4.0 起扩展词库扩至 4.74 万；
        词条数通过 HT_DICT_INFO 消息向后台查询。 -->
   <script src="popup.js"></script>

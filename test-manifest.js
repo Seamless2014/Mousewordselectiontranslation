@@ -43,6 +43,9 @@ check("manifest_version === 3", manifest.manifest_version === 3);
 check("版本号已升级到 1.2.0+",
   /^1\.(?:[2-9]|\d{2,})\./.test(String(manifest.version)),
   "当前 " + manifest.version + "，本次架构调整应升版本号");
+check("manifest 含 tts 权限（单词发音 v1.5.0）",
+  (manifest.permissions || []).indexOf("tts") >= 0,
+  "permissions = " + JSON.stringify(manifest.permissions || []));
 
 const cs = manifest.content_scripts || [];
 check("content_scripts 非空", cs.length > 0);
@@ -89,9 +92,21 @@ check("importScripts 包含 dict-extra.js", /importScripts[^)]*dict-extra\.js/.t
     "实际顺序 " + JSON.stringify(args));
 }
 
-// 4. background.js 必须处理 HT_LOOKUP / HT_DICT_INFO
+// 4. background.js 必须处理 HT_LOOKUP / HT_DICT_INFO / HT_TTS
 check("background.js 处理 HT_LOOKUP 消息", /["']HT_LOOKUP["']/.test(bgSrc));
 check("background.js 处理 HT_DICT_INFO 消息", /["']HT_DICT_INFO["']/.test(bgSrc));
+check("background.js 处理 HT_TTS 消息（单词发音 v1.5.0）",
+  /["']HT_TTS["']/.test(bgSrc) && /chrome\.tts\.speak/.test(bgSrc),
+  "需含 HT_TTS 分支并调用 chrome.tts.speak");
+check("background.js 处理 HT_GET_WORDS 消息（生词本 v1.5.0）",
+  /["']HT_GET_WORDS["']/.test(bgSrc));
+check("background.js 处理 HT_DEL_WORD 消息（生词本 v1.5.0）",
+  /["']HT_DEL_WORD["']/.test(bgSrc));
+check("background.js 处理 HT_CLEAR_WORDS 消息（生词本 v1.5.0）",
+  /["']HT_CLEAR_WORDS["']/.test(bgSrc));
+check("background.js 含 recordHistory 落盘函数（生词本 v1.5.0）",
+  /function\s+recordHistory\s*\(/.test(bgSrc),
+  "查词命中后异步落 storage.local.ht_history");
 
 // 5. popup.html 不再引入词库
 const popupHtml = fs.readFileSync(path.join(DIR, "popup.html"), "utf8");
@@ -103,10 +118,30 @@ check("popup.html 引入 popup.js", /<script[^>]+src=["']popup\.js["']/.test(pop
 
 const popupJs = fs.readFileSync(path.join(DIR, "popup.js"), "utf8");
 check("popup.js 通过 HT_DICT_INFO 查询词条数", /["']HT_DICT_INFO["']/.test(popupJs));
+check("popup.js 含 showTts 设置项（v1.5.0）",
+  /showTts/.test(popupJs), "需读/写 showTts 键");
+check("popup.js 含 enableSelection 设置项（v1.5.0 划词查询）",
+  /enableSelection/.test(popupJs), "需读/写 enableSelection 键");
 check("popup.js 不再直接引用 LOCAL_DICT / DICT_EXTRA",
   !/\bLOCAL_DICT\b|\bDICT_EXTRA\b/.test(popupJs));
 check("popup.js 不再直接引用 LOCAL_DICT / DICT_EXTRA",
   !/\bLOCAL_DICT\b|\bDICT_EXTRA\b/.test(popupJs));
+check("popup.html 含生词本列表容器 #wordList（v1.5.0）",
+  /id=["']wordList["']/.test(popupHtml));
+check("popup.html 含生词本计数 #wordsCount（v1.5.0）",
+  /id=["']wordsCount["']/.test(popupHtml));
+check("popup.html 含生词本导出/清空按钮（v1.5.0）",
+  /id=["']exportWordsBtn["']/.test(popupHtml) && /id=["']clearWordsBtn["']/.test(popupHtml));
+check("popup.js 含 renderWords 函数（生词本 v1.5.0）",
+  /function\s+renderWords\s*\(/.test(popupJs));
+check("popup.js 含 exportCsv 函数（生词本 v1.5.0）",
+  /function\s+exportCsv\s*\(/.test(popupJs));
+check("popup.js 含 clearWords 函数（生词本 v1.5.0）",
+  /function\s+clearWords\s*\(/.test(popupJs));
+check("popup.js 含 delWord 函数（生词本 v1.5.0）",
+  /function\s+delWord\s*\(/.test(popupJs));
+check("popup.js 通过 HT_GET_WORDS 拉取生词本（v1.5.0）",
+  /["']HT_GET_WORDS["']/.test(popupJs));
 
 // 6. 词库文件用 var 声明
 const dictSrc = fs.readFileSync(path.join(DIR, "dict.js"), "utf8");
@@ -158,6 +193,13 @@ check("content.js 不再自带 lookupLocal 实现", !/\bfunction\s+lookupLocal\s
 check("content.js 通过 HT_LOOKUP 向后台查词", /["']HT_LOOKUP["']/.test(contentCode));
 check("content.js 有本地查词超时保护",
   /LOCAL_LOOKUP_TIMEOUT/.test(contentCode), "后台重建时不应卡住取词");
+check("content.js 发送 HT_TTS 消息（单词发音 v1.5.0）",
+  /["']HT_TTS["']/.test(contentCode));
+check("content.js 渲染发音按钮（.ht-tts）",
+  /["']ht-tts["']/.test(contentCode), "需在气泡中渲染 .ht-tts 按钮");
+check("content.js 监听 mouseup 触发划词查询（v1.5.0）",
+  /["']mouseup["']/.test(contentCode) && /querySelection/.test(contentCode),
+  "需绑定 mouseup + querySelection 函数");
 
 // content.js 不应再引用已删除的 HT_SET_ENABLED
 check("无残留 HT_SET_ENABLED 消息类型", !/HT_SET_ENABLED/.test(contentSrc) &&

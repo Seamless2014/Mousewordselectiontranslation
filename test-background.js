@@ -43,6 +43,8 @@ function createWorker(opts) {
   let messageHandler = null;   // 记录 onMessage 注册的监听器
   let installedHandler = null;
   let ctx = null;              // vm 上下文，供 importScripts 注入脚本
+  // v1.5.0：生词本落 chrome.storage.local.ht_history，mock 出 local 区
+  const localStorageState = {};
 
   const sandbox = {
     console,
@@ -93,6 +95,20 @@ function createWorker(opts) {
         get(defaults, cb) { cb && cb(defaults); },
         set(_p, cb) { cb && cb(); },
       },
+      // v1.5.0：local 区 mock（生词本 ht_history 落这里）
+      local: {
+        get(keys, cb) {
+          const out = {};
+          const pick = k => { if (localStorageState[k] !== undefined) out[k] = localStorageState[k]; };
+          if (typeof keys === "string") pick(keys);
+          else if (Array.isArray(keys)) keys.forEach(pick);
+          else if (keys && typeof keys === "object") Object.keys(keys).forEach(k => {
+            out[k] = localStorageState[k] !== undefined ? localStorageState[k] : keys[k];
+          });
+          cb && cb(out);
+        },
+        set(patch, cb) { Object.assign(localStorageState, patch); cb && cb(); }
+      },
     },
   };
 
@@ -120,6 +136,7 @@ function createWorker(opts) {
   return {
     sandbox,
     importCalls,
+    localStorage: localStorageState,
     hasMessageHandler: () => typeof messageHandler === "function",
     hasInstalledHandler: () => typeof installedHandler === "function",
     /** 像内容脚本那样发消息并拿响应（同步响应场景） */
@@ -363,6 +380,92 @@ console.log("词库文件实际条目：精选 " + realCore + " 条，扩展 " +
     w.sandbox.chrome.runtime; // noop
   } catch (_) { unknownOk = false; }
   check("未知消息类型不会导致模块加载失败", unknownOk);
+
+  // ---------- 生词本（v1.5.0：HT_LOOKUP 命中后落 storage.local.ht_history）----------
+  console.log("\n[生词本] 查词命中后落盘 + 增删查");
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // 前面查词测试已落盘多条（efficiency/procurement/...），这里重置到干净起点
+  w.localStorage.ht_history = undefined;
+  check("初始 ht_history 为空（清空后）", !Array.isArray(w.localStorage.ht_history));
+
+  // 查 efficiency（HT_LOOKUP 命中精选）→ 落盘
+  const histLook1 = await w.send({ type: "HT_LOOKUP", word: "efficiency" });
+  check("生词本测试：efficiency 命中精选词库", histLook1 && histLook1.found);
+  await sleep(10);
+  const hist = w.localStorage.ht_history;
+  check("efficiency 命中后 ht_history 已落盘",
+    Array.isArray(hist) && hist.length === 1,
+    "实际：" + JSON.stringify(hist));
+  check("落盘 word 为 efficiency",
+    hist && hist[0] && hist[0].word === "efficiency",
+    hist && hist[0] ? hist[0].word : "无");
+  check("落盘 source 为 local",
+    hist && hist[0] && hist[0].source === "local");
+  check("落盘 plain 含「效率」",
+    hist && hist[0] && /效率/.test(hist[0].plain || ""),
+    hist && hist[0] ? hist[0].plain : "无");
+  check("落盘含 ts 时间戳（number 且 > 0）",
+    hist && hist[0] && typeof hist[0].ts === "number" && hist[0].ts > 0);
+
+  // 词组命中：matched 优先于 msg.word
+  const histLook2 = await w.send({ type: "HT_LOOKUP", word: "insofar", phrases: ["insofar as"] });
+  check("生词本测试：词组命中", histLook2 && histLook2.found);
+  await sleep(10);
+  const hist2 = w.localStorage.ht_history;
+  check("词组命中后 ht_history 长度增为 2",
+    hist2 && hist2.length === 2,
+    "实际长度：" + (hist2 ? hist2.length : "无"));
+  check("词组命中落盘 word 用 matched（insofar as）而非 msg.word",
+    hist2 && hist2[0] && hist2[0].word === "insofar as",
+    hist2 && hist2[0] ? hist2[0].word : "无");
+
+  // 去重：重复查 efficiency，不重复添加，覆盖到最前
+  const beforeLen = w.localStorage.ht_history.length;
+  await w.send({ type: "HT_LOOKUP", word: "efficiency" });
+  await sleep(10);
+  const hist3 = w.localStorage.ht_history;
+  check("重复查 efficiency 不重复添加（去重）",
+    hist3 && hist3.length === beforeLen,
+    "长度：" + beforeLen + " → " + (hist3 ? hist3.length : "无"));
+  check("去重后 efficiency 覆盖到最前",
+    hist3 && hist3[0] && hist3[0].word === "efficiency");
+
+  // 未命中不落盘
+  const missHist = await w.send({ type: "HT_LOOKUP", word: "zzzzqqq" });
+  check("未命中词不落盘（found:false 不写 history）",
+    missHist && missHist.found === false && hist3.length === w.localStorage.ht_history.length);
+
+  // HT_GET_WORDS 消息链路
+  const getResp = await w.send({ type: "HT_GET_WORDS" });
+  check("HT_GET_WORDS 返回 ok:true", getResp && getResp.ok === true, JSON.stringify(getResp));
+  check("HT_GET_WORDS 返回 words 数组",
+    getResp && Array.isArray(getResp.words) && getResp.words.length === 2,
+    getResp ? "words.length=" + getResp.words.length : "无");
+  check("HT_GET_WORDS words[0] 是最新（efficiency）",
+    getResp && getResp.words[0] && getResp.words[0].word === "efficiency");
+
+  // HT_DEL_WORD 删除指定词
+  const delResp = await w.send({ type: "HT_DEL_WORD", word: "efficiency" });
+  check("HT_DEL_WORD 返回 ok:true", delResp && delResp.ok === true);
+  const getResp2 = await w.send({ type: "HT_GET_WORDS" });
+  check("删除后 HT_GET_WORDS 不再含 efficiency",
+    getResp2 && getResp2.words && !getResp2.words.some(it => it.word === "efficiency"));
+  check("删除后剩 1 条（insofar as）",
+    getResp2 && getResp2.words.length === 1,
+    "实际剩 " + (getResp2 ? getResp2.words.length : "无"));
+
+  // HT_DEL_WORD 空 word 返回 ok:false
+  const delEmpty = await w.send({ type: "HT_DEL_WORD", word: "" });
+  check("HT_DEL_WORD 空词返回 ok:false", delEmpty && delEmpty.ok === false);
+
+  // HT_CLEAR_WORDS 清空
+  const clearResp = await w.send({ type: "HT_CLEAR_WORDS" });
+  check("HT_CLEAR_WORDS 返回 ok:true", clearResp && clearResp.ok === true);
+  const getResp3 = await w.send({ type: "HT_GET_WORDS" });
+  check("清空后 HT_GET_WORDS 返回空数组",
+    getResp3 && getResp3.words && getResp3.words.length === 0,
+    "实际：" + JSON.stringify(getResp3));
 
   // ---------- 降级场景：词库缺失 ----------
   console.log("\n[降级] 词库文件缺失时的行为");

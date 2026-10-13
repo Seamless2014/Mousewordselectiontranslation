@@ -36,6 +36,9 @@ function createWorker() {
     console,
     setTimeout, clearTimeout, setInterval, clearInterval,
     Promise, Map, Set, Object, Array, String, Number, Error, JSON,
+    // 在线通道构造 URL / 冷却计时需要（默认 fetch 直接 reject 的用例走不到，
+    // 但在线成功路径的用例会真实执行 fetchGoogle/fetchMyMemory）
+    encodeURIComponent, Date,
   };
 
   sandbox.importScripts = function () {
@@ -104,6 +107,7 @@ const dom = new JSDOM(
      <p id="p4">We should insofar as possible abide by the rules, out of the blue.</p>
      <p id="p5">A swimming pool and a nervous system, with exclusion zone markers.</p>
      <p id="p6">Please look forward to it, and come up with a plan, as soon as possible.</p>
+     <p id="p7">zwqxjy kwplx</p>
    </body></html>`,
   { pretendToBeVisual: true, url: "https://example.com/" }
 );
@@ -476,6 +480,60 @@ function bubbleVisible() {
   hoverTarget = null;
   document.body.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 300, clientY: 300 }));
   await sleep(420);
+
+  // ---- 12. 在线结果内容侧缓存（P0 回归）----
+  // 历史缺陷：translateWord 读缓存用「单词 + 最长词组候选」复合键，
+  // 而 requestOnline 写缓存误用纯单词键，同一个 Map 两套键，
+  // 导致在线结果第二次悬停永远 miss、再次发送 HT_TRANSLATE。
+  const ONLINE_WORD = "zwqxjy";
+  // 前置确认：该词本地确实未收录（含词组候选），保证走在线通道
+  const onlineProbe = await worker.dispatch({
+    type: "HT_LOOKUP", word: ONLINE_WORD, phrases: ["zwqxjy kwplx"]
+  });
+  check("回归前置：" + ONLINE_WORD + " 本地未收录（确保走在线通道）",
+    onlineProbe && onlineProbe.ok && onlineProbe.found === false,
+    JSON.stringify(onlineProbe));
+
+  // 桩：Google 通道成功返回一条中文译文，MyMemory 保持失败
+  worker.sandbox.fetch = function (url) {
+    if (String(url).indexOf("translate.googleapis.com") >= 0) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([[["在线兜底释义", ONLINE_WORD]], null, "en"])
+      });
+    }
+    return Promise.reject(new Error("offline test"));
+  };
+  // 开启在线兜底（经 storage.onChanged 同步到内容脚本状态）
+  storage.onlineFallback = true;
+  storageListeners.forEach(fn => fn({ onlineFallback: { newValue: true } }, "sync"));
+
+  const countOnline = () => sentMessages.filter(
+    m => m.type === "HT_TRANSLATE" && m.word === ONLINE_WORD).length;
+
+  const p7 = document.getElementById("p7");
+  await hoverWord(p7, ONLINE_WORD);
+  await sleep(150); // 等本地 miss -> HT_TRANSLATE -> 后台竞速返回 -> 渲染
+  check("未收录词首次悬停发送 1 次 HT_TRANSLATE", countOnline() === 1,
+    "实际 " + countOnline() + " 次");
+  check("在线结果渲染到气泡（在线角标）",
+    bubbleVisible() && bubbleText().includes("在线翻译"), bubbleText().slice(0, 90));
+
+  // 移开、等气泡收起，再悬停同一个词
+  hoverTarget = null;
+  document.body.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 300, clientY: 300 }));
+  await sleep(420);
+  await hoverWord(p7, ONLINE_WORD);
+  await sleep(150);
+  check("第二次悬停命中内容侧缓存：HT_TRANSLATE 仍为 1 次",
+    countOnline() === 1, "实际 " + countOnline() + " 次（缓存键不一致会变成 2 次）");
+  check("二次悬停直接展示缓存的在线译文",
+    bubbleVisible() && bubbleText().includes("在线兜底释义"), bubbleText().slice(0, 90));
+
+  // 还原现场，避免影响后续套件（本文件虽为末段，仍保持夹具可复用）
+  storage.onlineFallback = false;
+  storageListeners.forEach(fn => fn({ onlineFallback: { newValue: false } }, "sync"));
+  worker.sandbox.fetch = () => Promise.reject(new Error("offline test"));
 
   // ---------------- 输出 ----------------
   console.log(results.join("\n"));

@@ -17,6 +17,10 @@ const contentSrc = fs.readFileSync(path.join(DIR, "content.js"), "utf8");
 function createWorker() {
   let messageHandler = null;
   let ctx = null;
+  // v1.5.0：TTS 调用记录（background.js chrome.tts.speak 走到这里）
+  const ttsCalls = [];
+  // v1.5.0：生词本落 chrome.storage.local.ht_history，mock 出 local 区
+  const localStorageState = {};
   const sandbox = {
     console,
     setTimeout, clearTimeout, setInterval, clearInterval,
@@ -39,7 +43,28 @@ function createWorker() {
     contextMenus: { removeAll(cb) { cb && cb(); }, create() {}, onClicked: { addListener() {} } },
     commands: { onCommand: { addListener() {} } },
     tabs: { query(_q, cb) { cb && cb([]); }, sendMessage(_i, _m, cb) { cb && cb(); } },
-    storage: { sync: { get(d, cb) { cb && cb(d); }, set(_p, cb) { cb && cb(); } } },
+    storage: {
+      sync: { get(d, cb) { cb && cb(d); }, set(_p, cb) { cb && cb(); } },
+      // v1.5.0：local 区 mock（生词本 ht_history 落这里）
+      local: {
+        get(keys, cb) {
+          const out = {};
+          const pick = k => { if (localStorageState[k] !== undefined) out[k] = localStorageState[k]; };
+          if (typeof keys === "string") pick(keys);
+          else if (Array.isArray(keys)) keys.forEach(pick);
+          else if (keys && typeof keys === "object") Object.keys(keys).forEach(k => {
+            out[k] = localStorageState[k] !== undefined ? localStorageState[k] : keys[k];
+          });
+          cb && cb(out);
+        },
+        set(patch, cb) { Object.assign(localStorageState, patch); cb && cb(); }
+      }
+    },
+    // v1.5.0：TTS mock（记录 speak 调用供测试断言）
+    tts: {
+      speak(text, opts) { ttsCalls.push({ text: text, opts: opts }); },
+      stop() {}
+    },
   };
   sandbox.fetch = () => Promise.reject(new Error("offline test"));
   sandbox.AbortController = function () { this.signal = {}; this.abort = function () {}; };
@@ -61,6 +86,8 @@ function createWorker() {
         messageHandler(msg, { id: "test" }, resp => { clearTimeout(t); resolve(resp); });
       });
     },
+    ttsCalls: ttsCalls,
+    localStorage: localStorageState,
   };
 }
 const worker = createWorker();
@@ -80,6 +107,32 @@ document.caretRangeFromPoint = function () {
   r.setEnd(hoverTarget.node, hoverTarget.offset);
   return r;
 };
+
+// ---- 划词查询 mock：jsdom 的 Selection API 不完整，手动 mock ----
+let mockSel = null;
+window.getSelection = function () {
+  return mockSel || {
+    isCollapsed: true,
+    rangeCount: 0,
+    toString: function () { return ""; },
+    getRangeAt: function () { return null; }
+  };
+};
+function setSelection(text, rect) {
+  mockSel = {
+    isCollapsed: false,
+    rangeCount: 1,
+    toString: function () { return text; },
+    getRangeAt: function () {
+      return {
+        getBoundingClientRect: function () {
+          return rect || { left: 50, top: 50, width: 100, height: 20, bottom: 70 };
+        }
+      };
+    }
+  };
+}
+function clearSelection() { mockSel = null; }
 
 // ---- 模拟 chrome ----
 const storageState = { enabled: true, onlineFallback: false, showPhonetic: true, hoverDelay: 80, showBall: true };
@@ -118,6 +171,7 @@ global.document = document;
 global.Node = window.Node;
 global.HTMLElement = window.HTMLElement;
 global.getComputedStyle = window.getComputedStyle;
+global.location = window.location;
 
 // 按 manifest 声明顺序注入（v1.2.0 起内容脚本只有 content.js）。
 const manifest = JSON.parse(fs.readFileSync(path.join(DIR, "manifest.json"), "utf8"));
@@ -267,6 +321,232 @@ const bubbleText = () => {
   // 此时 storage.enabled 应为 false，重新构造一个内容脚本实例验证读取
   check("storage 中持久化了关闭状态", storageState.enabled === false,
     "storage.enabled=" + storageState.enabled);
+
+  // ---------- 路径 D：站点黑名单 ----------
+  console.log("\n[路径 D] 站点黑名单（disabledSites）");
+  // 先恢复 enabled=true（上面持久化测试把它关了）
+  storageListeners.forEach(fn => fn({ enabled: { newValue: true } }, "sync"));
+  await sleep(30);
+  check("恢复 enabled 后悬浮球存在", !!document.querySelector(".ht-ball"));
+
+  // D1：屏蔽当前站点 example.com
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: ["example.com"] } }, "sync"));
+  await sleep(30);
+  check("屏蔽当前站点后悬浮球被移除", !document.querySelector(".ht-ball"),
+    "仍有悬浮球");
+  await hover(p1, "efficiency");
+  check("屏蔽当前站点后悬停不弹气泡", !bubbleVisible());
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(120);
+
+  // D2：解除屏蔽
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: [] } }, "sync"));
+  await sleep(30);
+  check("解除屏蔽后悬浮球恢复", !!document.querySelector(".ht-ball"));
+  await hover(p1, "efficiency");
+  check("解除屏蔽后悬停恢复弹气泡", bubbleVisible());
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+
+  // D3：屏蔽其他站点不影响当前
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: ["other.com"] } }, "sync"));
+  await sleep(30);
+  check("屏蔽其他站点不影响当前悬浮球", !!document.querySelector(".ht-ball"));
+  await hover(p1, "efficiency");
+  check("屏蔽其他站点后当前仍可悬停弹气泡", bubbleVisible());
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+
+  // ---------- 路径 E：单词发音（v1.5.0） ----------
+  console.log("\n[路径 E] 单词发音按钮（HT_TTS）");
+  // 恢复 showTts 默认开启
+  storageListeners.forEach(fn => fn({ showTts: { newValue: true } }, "sync"));
+  await sleep(30);
+
+  // E1：悬停后气泡含发音按钮
+  await hover(p1, "efficiency");
+  const ttsBtn = document.querySelector(".ht-bubble .ht-tts");
+  check("E1 气泡中存在发音按钮 .ht-tts", !!ttsBtn, "未渲染 .ht-tts");
+  if (ttsBtn) {
+    check("E1 发音按钮带 data-word 属性（值为 efficiency）",
+      ttsBtn.getAttribute("data-word") === "efficiency",
+      "data-word = " + ttsBtn.getAttribute("data-word"));
+  }
+
+  // E2：点击发音按钮 → 发 HT_TTS 消息 → 后台 chrome.tts.speak 被调用
+  if (ttsBtn) {
+    const ttsCallsBefore = worker.ttsCalls.length;
+    const sentTtsBefore = sentToBackground.filter(m => m.type === "HT_TTS").length;
+    ttsBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await sleep(50);
+    check("E2 点击发音按钮后发出 HT_TTS 消息",
+      sentToBackground.filter(m => m.type === "HT_TTS").length > sentTtsBefore,
+      "HT_TTS 消息数未增加");
+    check("E2 后台 chrome.tts.speak 被调用且参数正确",
+      worker.ttsCalls.length > ttsCallsBefore &&
+      worker.ttsCalls[worker.ttsCalls.length - 1].text === "efficiency",
+      "ttsCalls = " + JSON.stringify(worker.ttsCalls.map(c => c.text)));
+    check("E2 speak 调用使用 en-US 语音",
+      worker.ttsCalls[worker.ttsCalls.length - 1].opts.lang === "en-US");
+  }
+
+  // E3：showTts=false → 下次悬停气泡不再含发音按钮
+  storageListeners.forEach(fn => fn({ showTts: { newValue: false } }, "sync"));
+  await sleep(30);
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+  await hover(p1, "efficiency");
+  check("E3 showTts=false 后气泡不再含发音按钮",
+    !document.querySelector(".ht-bubble .ht-tts"),
+    "仍存在 .ht-tts");
+
+  // E4：恢复 showTts=true → 重新出现发音按钮
+  storageListeners.forEach(fn => fn({ showTts: { newValue: true } }, "sync"));
+  await sleep(30);
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+  await hover(p1, "efficiency");
+  check("E4 showTts=true 恢复后发音按钮重新出现",
+    !!document.querySelector(".ht-bubble .ht-tts"));
+  hoverTarget = null;
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+
+  // ---------- 路径 F：划词/双击查询（v1.5.0） ----------
+  console.log("\n[路径 F] 划词/双击查询（enableSelection）");
+  // 确保总开关 + 划词开关都开
+  storageListeners.forEach(fn => fn({ enabled: { newValue: true } }, "sync"));
+  storageListeners.forEach(fn => fn({ enableSelection: { newValue: true } }, "sync"));
+  await sleep(30);
+
+  // F1：双击单词（mock selection = "efficiency"）→ 气泡显示释义
+  setSelection("efficiency");
+  p1.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true, clientX: 60, clientY: 60 }));
+  await sleep(120);
+  check("F1 选区单词 efficiency 触发查询并弹气泡", bubbleVisible(),
+    "气泡状态: " + (bubbleVisible() ? "visible" : "hidden"));
+  check("F1 气泡含 efficiency 释义", /效率/.test(bubbleText()),
+    bubbleText().slice(0, 80));
+  check("F1 走 HT_LOOKUP 消息（单词查词库）",
+    sentToBackground.some(m => m.type === "HT_LOOKUP" && m.word === "efficiency"));
+  clearSelection();
+
+  // F2：多词选区 → 走 HT_TRANSLATE 整句翻译
+  // 先开 onlineFallback 让多词查询能走到 HT_TRANSLATE 分支
+  storageListeners.forEach(fn => fn({ onlineFallback: { newValue: true } }, "sync"));
+  await sleep(30);
+  const sentTranslateBefore = sentToBackground.filter(m => m.type === "HT_TRANSLATE").length;
+  setSelection("efficiency approach");
+  p1.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true, clientX: 60, clientY: 60 }));
+  await sleep(150);
+  check("F2 多词选区触发 HT_TRANSLATE 消息",
+    sentToBackground.filter(m => m.type === "HT_TRANSLATE").length > sentTranslateBefore,
+    "HT_TRANSLATE 数未增加");
+  check("F2 HT_TRANSLATE 携带完整多词文本",
+    sentToBackground.some(m => m.type === "HT_TRANSLATE" && m.word === "efficiency approach"));
+  clearSelection();
+
+  // F3：enableSelection=false → mouseup 不触发查询
+  storageListeners.forEach(fn => fn({ enableSelection: { newValue: false } }, "sync"));
+  await sleep(30);
+  // 先关掉当前气泡
+  p1.dispatchEvent(new window.MouseEvent("mousemove", { bubbles: true, clientX: 400, clientY: 400 }));
+  await sleep(420);
+  const sentLookupBefore = sentToBackground.filter(m => m.type === "HT_LOOKUP").length;
+  const sentTranslateBefore2 = sentToBackground.filter(m => m.type === "HT_TRANSLATE").length;
+  setSelection("implementation");
+  p1.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true, clientX: 60, clientY: 60 }));
+  await sleep(150);
+  check("F3 enableSelection=false 后 mouseup 不发 HT_LOOKUP",
+    sentToBackground.filter(m => m.type === "HT_LOOKUP").length === sentLookupBefore);
+  check("F3 enableSelection=false 后 mouseup 不发 HT_TRANSLATE",
+    sentToBackground.filter(m => m.type === "HT_TRANSLATE").length === sentTranslateBefore2);
+  clearSelection();
+  // 恢复
+  storageListeners.forEach(fn => fn({ enableSelection: { newValue: true } }, "sync"));
+  await sleep(30);
+
+  // F4：站点黑名单不影响划词查询（划词豁免 siteDisabled）
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: ["example.com"] } }, "sync"));
+  await sleep(30);
+  check("F4 站点屏蔽后悬浮球被移除（对照）", !document.querySelector(".ht-ball"));
+  setSelection("approach");
+  p1.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true, clientX: 60, clientY: 60 }));
+  await sleep(150);
+  check("F4 站点屏蔽下划词仍弹气泡（划词豁免黑名单）", bubbleVisible(),
+    "气泡状态: " + (bubbleVisible() ? "visible" : "hidden"));
+  check("F4 站点屏蔽下划词仍发 HT_LOOKUP",
+    sentToBackground.some(m => m.type === "HT_LOOKUP" && m.word === "approach"));
+  clearSelection();
+  // 清理：解除屏蔽
+  storageListeners.forEach(fn => fn({ disabledSites: { newValue: [] } }, "sync"));
+  await sleep(30);
+
+  // ---------- 路径 G：生词本端到端（v1.5.0）----------
+  console.log("\n[路径 G] 查词命中后落盘到生词本（端到端）");
+  // 前面 hover 测试已落盘多条，这里重置到干净起点
+  worker.localStorage.ht_history = undefined;
+  // 确保总开关开
+  storageListeners.forEach(fn => fn({ enabled: { newValue: true } }, "sync"));
+  await sleep(30);
+
+  // G1：发 HT_LOOKUP（命中精选词库）→ 后台 recordHistory 落盘到 worker.localStorage
+  //     注：不依赖 hover 触发，因为前面 hover 测试已让 content 侧缓存了 efficiency，
+  //     hover 命中缓存不会重新发 HT_LOOKUP（这是 v1.2.0 内容侧 LRU 缓存的正常行为）。
+  //     这里直接发消息验证 background 的 recordHistory 落盘链路端到端可用。
+  const g1Resp = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_LOOKUP", word: "efficiency" }, resp => resolve(resp));
+  });
+  check("G1 HT_LOOKUP 返回 found:true", g1Resp && g1Resp.found === true, JSON.stringify(g1Resp));
+  await sleep(20);
+  check("G1 worker.localStorage.ht_history 已落盘",
+    Array.isArray(worker.localStorage.ht_history) && worker.localStorage.ht_history.length >= 1,
+    "实际：" + JSON.stringify(worker.localStorage.ht_history));
+  check("G1 落盘 word 为 efficiency",
+    worker.localStorage.ht_history && worker.localStorage.ht_history[0] &&
+    worker.localStorage.ht_history[0].word === "efficiency",
+    worker.localStorage.ht_history && worker.localStorage.ht_history[0] ?
+    worker.localStorage.ht_history[0].word : "无");
+  check("G1 落盘 source 为 local",
+    worker.localStorage.ht_history && worker.localStorage.ht_history[0] &&
+    worker.localStorage.ht_history[0].source === "local");
+
+  // G2：HT_GET_WORDS 消息链路（通过 chromeMock 转发到 worker）
+  const g2Resp = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_GET_WORDS" }, resp => resolve(resp));
+  });
+  check("G2 HT_GET_WORDS 返回 ok:true", g2Resp && g2Resp.ok === true, JSON.stringify(g2Resp));
+  check("G2 HT_GET_WORDS 返回 efficiency 条目",
+    g2Resp && Array.isArray(g2Resp.words) && g2Resp.words.some(it => it.word === "efficiency"),
+    g2Resp ? "words.length=" + g2Resp.words.length : "无");
+
+  // G3：HT_DEL_WORD 删除单条
+  const g3Resp = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_DEL_WORD", word: "efficiency" }, resp => resolve(resp));
+  });
+  check("G3 HT_DEL_WORD 返回 ok:true", g3Resp && g3Resp.ok === true);
+  const g3Get = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_GET_WORDS" }, resp => resolve(resp));
+  });
+  check("G3 删除后 HT_GET_WORDS 不再含 efficiency",
+    g3Get && g3Get.words && !g3Get.words.some(it => it.word === "efficiency"));
+
+  // G4：HT_CLEAR_WORDS 清空
+  const g4Resp = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_CLEAR_WORDS" }, resp => resolve(resp));
+  });
+  check("G4 HT_CLEAR_WORDS 返回 ok:true", g4Resp && g4Resp.ok === true);
+  const g4Get = await new Promise(resolve => {
+    chromeMock.runtime.sendMessage({ type: "HT_GET_WORDS" }, resp => resolve(resp));
+  });
+  check("G4 清空后 HT_GET_WORDS 返回空数组",
+    g4Get && g4Get.words && g4Get.words.length === 0,
+    "实际：" + JSON.stringify(g4Get));
 
   console.log(log.join("\n"));
   console.log("\n通过 " + pass + " / " + (pass + fail));

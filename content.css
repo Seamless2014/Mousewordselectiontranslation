@@ -37,7 +37,7 @@
   transform: translateY(0);
 }
 
-/* 顶部：单词 + 音标 */
+/* 顶部：单词 + 音标 + 发音按钮 */
 .ht-bubble .ht-head {
   display: flex !important;
   align-items: baseline !important;
@@ -61,6 +61,39 @@
   font-weight: 400 !important;
   font-family: "Segoe UI", Arial, sans-serif !important;
   white-space: nowrap !important;
+}
+
+/* 发音按钮：小喇叭，深色气泡里用浅灰，hover/active 蓝色高亮 */
+.ht-bubble .ht-tts {
+  flex: 0 0 auto !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 22px !important;
+  height: 22px !important;
+  margin-left: auto !important;
+  color: #9aa3b2 !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  outline: none !important;
+  transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease !important;
+}
+.ht-bubble .ht-tts:hover,
+.ht-bubble .ht-tts:focus-visible {
+  color: #8fd0ff !important;
+  background: rgba(80, 160, 255, 0.18) !important;
+  border-color: rgba(80, 160, 255, 0.35) !important;
+}
+.ht-bubble .ht-tts:active {
+  transform: scale(0.92) !important;
+}
+.ht-bubble .ht-tts svg {
+  display: block !important;
+  width: 14px !important;
+  height: 14px !important;
 }
 
 /* 词形还原提示 */

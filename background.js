@@ -9,8 +9,8 @@
  * 为什么词库放在后台（v1.2.0 架构调整）：
  *  改造前词库由 content_scripts 注入，而内容脚本是「每个 frame 一份独立 JS 环境」，
  *  于是每开一个标签页、每个 iframe 都要各自解析并持有一份词库（堆约 34 MB）。
- *  实测 20 个标签页 × 平均 5 个 iframe ≈ 100 份 ≈ 870 MB，且同一份 2.1 MB 脚本被
- *  重复解析 100 次。改为后台集中持有后，内存恒定 8.7 MB，与标签页数量无关。
+ *  实测 20 个标签页 × 平均 5 个 iframe ≈ 100 份 ≈ 3.4 GB，且同一份 6.2 MB 脚本被
+ *  重复解析 100 次。改为后台集中持有后，内存恒定约 9.5 MB，与标签页数量无关。
  *  代价是每次查词多一次消息往返（实测 1–3 ms，远小于 hoverDelay 的 320 ms）。
  *
  * 性能设计（目标：本地未收录时 1 秒内出结果）：
@@ -33,7 +33,7 @@
 // 注意：四个文件都是顶层 var 声明，作用域是 worker 全局，重复 importScripts 无害。
 importScripts("dict.js", "dict-extra.js", "dict-phrase.js", "dict-lookup.js");
 
-const HT_BG_VERSION = "1.4.0";
+const HT_BG_VERSION = "1.5.0";
 
 // dict.js / dict-extra.js / dict-phrase.js 末尾都有「仅保留合法键」的自检，
 // 这里再兜一层：确认词库真的可用，否则把查词请求直接判为未命中（走在线兜底）。
@@ -90,6 +90,66 @@ function cacheSet(word, result) {
     // 淘汰最旧的一条
     const oldest = cache.keys().next().value;
     cache.delete(oldest);
+  }
+}
+
+// ---------- 生词本（查词历史）----------
+//
+// 落盘到 chrome.storage.local.ht_history，与 sync 配置分离：
+//   1. sync 配额仅 100 KB，留给 8 个开关字段；查词历史可能上千条，必须走 local（10 MB）
+//   2. 跨标签页/多 frame 的查词请求都汇聚到后台这里统一落盘，去重一致
+//
+// 结构：数组 [{word, display, phonetic, plain, groups, source, ts}, ...]，最新在前。
+//   - 同一 word 覆盖到最前（更新 ts/释义），不重复添加
+//   - 上限 1000 条，超限淘汰最旧
+//   - 任何异常必须吞掉（console.warn），不得影响查词主流程
+const HISTORY_KEY = "ht_history";
+const HISTORY_MAX = 1000;
+
+/**
+ * 把一次成功查词的结果落到生词本。
+ * 在 HT_LOOKUP 命中、HT_TRANSLATE 成功后调用。异步进行，不阻塞响应。
+ *
+ * @param {string} rawWord 消息里传入的原始词（词组场景下可能只是首词）
+ * @param {object} result 渲染就绪结果对象，优先取 result.matched 作为真实命中的词
+ */
+function recordHistory(rawWord, result) {
+  try {
+    if (!result) return;
+    // 词组命中时 msg.word 只是首词，真正命中的是 result.matched（如 "swimming pool"）
+    const w = String(result.matched || rawWord || "").trim();
+    if (!w) return;
+    const item = {
+      word: w,
+      display: result.display || w,
+      phonetic: result.phonetic || "",
+      plain: result.plain || "",
+      groups: Array.isArray(result.groups) ? result.groups : [],
+      source: result.source || "local",
+      ts: Date.now()
+    };
+    chrome.storage.local.get(HISTORY_KEY, data => {
+      if (chrome.runtime.lastError) {
+        console.warn("[悬停取词翻译] 生词本读取失败：" + chrome.runtime.lastError.message);
+        return;
+      }
+      const arr = Array.isArray(data && data[HISTORY_KEY]) ? data[HISTORY_KEY] : [];
+      // 去重：同一 word 覆盖到最前（旧条目删除）
+      const filtered = arr.filter(it => !it || it.word !== w);
+      filtered.unshift(item);
+      // 截断到上限
+      if (filtered.length > HISTORY_MAX) filtered.length = HISTORY_MAX;
+      const toSet = {};
+      toSet[HISTORY_KEY] = filtered;
+      chrome.storage.local.set(toSet, () => {
+        if (chrome.runtime.lastError) {
+          console.warn("[悬停取词翻译] 生词本写入失败：" + chrome.runtime.lastError.message);
+        }
+      });
+    });
+  } catch (e) {
+    // 容错：任何异常不能影响查词主流程
+    console.warn("[悬停取词翻译] 生词本记录异常：" + (e && e.message ? e.message : e));
   }
 }
 
@@ -338,8 +398,63 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } catch (e) {
       resp = { ok: false, found: false, reason: String(e && e.message ? e.message : e) };
     }
+    // 命中本地词库 → 异步落到生词本（不阻塞响应）
+    if (resp && resp.ok && resp.found && resp.result) {
+      recordHistory(msg.word, resp.result);
+    }
     sendResponse(resp);
     return false; // 已同步响应
+  }
+
+  if (msg.type === "HT_GET_WORDS") {
+    // popup 拉取生词本列表
+    chrome.storage.local.get(HISTORY_KEY, data => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      const arr = Array.isArray(data && data[HISTORY_KEY]) ? data[HISTORY_KEY] : [];
+      sendResponse({ ok: true, words: arr });
+    });
+    return true; // 异步响应
+  }
+
+  if (msg.type === "HT_DEL_WORD") {
+    // 从生词本删除指定词
+    const w = String(msg.word || "").trim();
+    if (!w) { sendResponse({ ok: false, error: "empty word" }); return false; }
+    chrome.storage.local.get(HISTORY_KEY, data => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      const arr = Array.isArray(data && data[HISTORY_KEY]) ? data[HISTORY_KEY] : [];
+      const filtered = arr.filter(it => !it || it.word !== w);
+      const toSet = {};
+      toSet[HISTORY_KEY] = filtered;
+      chrome.storage.local.set(toSet, () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        sendResponse({ ok: true });
+      });
+    });
+    return true; // 异步响应
+  }
+
+  if (msg.type === "HT_CLEAR_WORDS") {
+    // 清空生词本
+    const toSet = {};
+    toSet[HISTORY_KEY] = [];
+    chrome.storage.local.set(toSet, () => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      sendResponse({ ok: true });
+    });
+    return true; // 异步响应
   }
 
   if (msg.type === "HT_DICT_INFO") {
@@ -355,10 +470,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "HT_TRANSLATE") {
-    translate(String(msg.word || "").trim(), { extended: msg.extended === true })
-      .then(sendResponse)
+    const w = String(msg.word || "").trim();
+    translate(w, { extended: msg.extended === true })
+      .then(res => {
+        // 在线翻译成功 → 异步落到生词本
+        if (res && res.ok) recordHistory(w, res);
+        sendResponse(res);
+      })
       .catch(e => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true; // 异步响应
+  }
+
+  if (msg.type === "HT_TTS") {
+    // 单词发音：chrome.tts 只能在 service worker / popup 中调用，content 脚本无权访问。
+    // 朗读是异步动作，但先同步返回 ok 让内容脚本不阻塞；失败由 onEvent 记日志。
+    // 容错：浏览器禁用 TTS 或权限缺失时返回结构化错误（success=false + message），
+    // 内容脚本本身不依赖响应做后续动作，但保持协议一致性。
+    const w = String(msg.word || "").trim();
+    if (!w) { sendResponse({ ok: false, error: "empty word" }); return false; }
+    if (typeof chrome === "undefined" || !chrome.tts || typeof chrome.tts.speak !== "function") {
+      sendResponse({ ok: false, error: "chrome.tts 不可用（缺少权限或浏览器不支持）" });
+      return false;
+    }
+    try {
+      chrome.tts.speak(w, {
+        lang: "en-US",
+        rate: 0.95,
+        pitch: 1.0,
+        volume: 1.0,
+        onEvent: function (e) {
+          if (e && e.type === "error") {
+            console.warn("[悬停取词翻译] TTS 朗读失败：" + (e.errorMessage || "未知错误"));
+          }
+        }
+      });
+      sendResponse({ ok: true });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+    }
+    return false;
   }
 });
 
@@ -378,7 +528,7 @@ function createMenus() {
 chrome.runtime.onInstalled.addListener(() => {
   createMenus();
   chrome.storage.sync.get(
-    { enabled: true, onlineFallback: true, showPhonetic: true, hoverDelay: 320, showBall: true },
+    { enabled: true, onlineFallback: true, showPhonetic: true, showTts: true, enableSelection: true, hoverDelay: 320, showBall: true, disabledSites: [] },
     cfg => {
       // 仅在首次安装（无既有值）时写入默认值
       chrome.storage.sync.set(cfg);

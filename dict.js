@@ -9,8 +9,9 @@
  * 未收录词由 background.js 的在线接口兜底。
  *
  * 注意：必须用 var（而非 const/let）声明——
- * 内容脚本与 popup 两个上下文都会加载本文件，var 允许安全重复执行；
- * 且 content_scripts 中 dict.js 先于 content.js 注入，同一隔离环境可直接访问。
+ * v1.2.0 起本文件只由 Service Worker（background.js）通过 importScripts 加载，
+ * 内容脚本与 popup 均不再加载词库；var 会挂到 worker 全局作用域，
+ * 且 Service Worker 重建后重复 importScripts 也能安全重新执行。
  */
 var LOCAL_DICT = {
 

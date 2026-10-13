@@ -169,7 +169,7 @@ t("popup.js 用 try/catch 包裹 sendMessage", /try\s*\{[\s\S]{0,400}HT_DICT_INF
 // 「翻译服务暂时不可用」，再悬停又正常。现在内容脚本失败后静默重试一次
 // （后台放宽超时），后台另带通道冷却，避免陪不可达通道反复耗到超时。
 t("content.js 失败后静默重试一次（requestOnline 递归 + isRetry 标记）",
-  /function\s+requestOnline\s*\([^)]*isRetry[\s\S]{0,1200}requestOnline\(rawWord,\s*seq,\s*true\)/.test(contentSrc));
+  /function\s+requestOnline\s*\([^)]*isRetry[\s\S]{0,1200}requestOnline\(rawWord,\s*seq,\s*true\s*,\s*cacheKey\)/.test(contentSrc));
 t("重试请求带 extended 标记（让后台放宽超时预算）",
   /extended:\s*isRetry\s*===\s*true/.test(contentSrc));
 t("重试期间显示「重试中」加载态而非报错", /重试中/.test(contentSrc));
@@ -181,6 +181,20 @@ t("background 有通道健康记忆（连续失败进入冷却）",
 t("通道成功时重置健康计数", /function\s+noteChannelSuccess[\s\S]{0,200}fails:\s*0/.test(bgSrc));
 t("词典拆词支持连字符合成词（lookupCompound）", /function\s+lookupCompound/.test(dictLookupSrc));
 t("拆词失败（任一段未命中）不硬凑、维持在线兜底", /if\s*\(!h\)\s*return\s*null;\s*\/\/ 任一段未命中/.test(dictLookupSrc));
+
+// --- 6. 内容侧缓存 LRU（v1.4.1）---
+// 场景：长时间挂着的长文档里查词量线性增长，旧实现 state.cache 只增不减。
+// 现在引入 cacheGet/cacheSet（与后台同一套语义）：命中移到末尾、写入超上限淘汰最旧。
+t("content.js 有内容侧缓存上限常量 CACHE_MAX", /const\s+CACHE_MAX\s*=\s*\d+/.test(contentSrc));
+t("content.js cacheGet 命中后移到末尾（LRU）",
+  /function\s+cacheGet[\s\S]{0,200}state\.cache\.delete\(key\)[\s\S]{0,80}state\.cache\.set\(key,\s*v\)/.test(contentSrc));
+t("content.js cacheSet 超上限淘汰最旧一条",
+  /function\s+cacheSet[\s\S]{0,300}state\.cache\.size\s*>\s*CACHE_MAX[\s\S]{0,120}cache\.keys\(\)\.next\(\)\.value/.test(contentSrc));
+t("content.js 业务读写统一走 cacheGet/cacheSet（state.cache.set 仅出现在辅助函数内）",
+  (contentSrc.match(/state\.cache\.set\(/g) || []).length === 2 &&
+  (contentSrc.match(/state\.cache\.get\(/g) || []).length === 1);
+t("content.js hoverDelay 读取时同时夹上下限（80–900ms）",
+  /Math\.min\(\s*900\s*,\s*Math\.max\(\s*80\s*,\s*Number\([^)]*\)\s*\|\|\s*320\s*\)\s*\)/.test(contentSrc));
 
 console.log("\n通过 " + pass + " / " + (pass + fail));
 process.exit(fail === 0 ? 0 : 1);

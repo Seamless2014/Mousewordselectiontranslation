@@ -10,8 +10,9 @@
  * v1.2.0 架构调整：本文件**不再包含词库**。
  *  改造前 dict.js / dict-extra.js 由 manifest 注入，而内容脚本是「每个 frame 一份
  *  独立 JS 环境」，于是每个标签页、每个 iframe 都要各自解析并持有一份词库
- *  （堆约 8.7 MB），20 个标签页 × 5 个 iframe 就是约 870 MB。
- *  现在词库由 service worker 全局持有一份，本文件只负责取词、请求、渲染。
+ *  （堆约 34 MB），20 个标签页 × 5 个 iframe 就是约 3.4 GB。
+ *  现在词库由 service worker 全局持有一份（SW 堆约 9.5 MB，不随标签页增长），
+ *  本文件只负责取词、请求、渲染。
  *  词形还原与词条组装也一并移到后台（dict-lookup.js），避免双份实现漂移。
  *
  * v1.3.0 词组支持：悬停取词从「单个单词」扩展为「单词 + 一组词组候选」。
@@ -26,31 +27,66 @@
   if (window.__hoverTranslateInjected) return;
   window.__hoverTranslateInjected = true;
 
-  const HT_VERSION = "1.4.0";
+  const HT_VERSION = "1.5.0";
 
   // 后台查词的超时保护：本地查词实测 1–3 ms，200 ms 已经非常宽松。
   // 设这个上限是为了应对「service worker 正在重建」等极端情况 ——
   // 超时后不报错，直接走在线兜底，用户无感。
   const LOCAL_LOOKUP_TIMEOUT = 200;
+  // 冷启动超时：SW 被休眠后首次唤醒需要重新 importScripts 解析 6.2MB 词库，
+  // 低端机/磁盘繁忙时 200ms 可能不够，首次放宽到 600ms。
+  // 收到首次 SW 响应后自动切回 200ms。
+  const COLD_LOOKUP_TIMEOUT = 600;
+  let localLookupCold = true;   // 是否仍处于冷启动期
+
+  // 内容侧缓存上限（条）。后台是 800 条（全浏览器共享），内容侧是页面级、
+  // 只缓存本页查过的词，故上限更小；长时间挂着的长文档不会让缓存无限增长。
+  const CACHE_MAX = 500;
 
   // ---------- 状态 ----------
   const state = {
     enabled: true,          // 总开关
     onlineFallback: true,   // 在线兜底
     showPhonetic: true,
+    showTts: true,          // 气泡显示发音按钮（v1.5.0）
+    enableSelection: true,  // 启用划词/双击查询（v1.5.0）
+    showBall: true,         // 显示悬浮球
     hoverDelay: 320,        // 悬停多久才触发（毫秒）
     bubble: null,           // 气泡 DOM
     ball: null,             // 悬浮球 DOM
     timer: null,            // 悬停延迟计时器
     hideTimer: null,        // 隐藏计时器
     currentWord: null,      // 当前正在展示的词
+    currentTtsWord: "",     // 当前气泡的发音目标词（供 speakWord 使用）
+    lastSelectionKey: "",   // 最近查过的选区文本（去重，避免双击后 mouseup 二次查询）
     reqSeq: 0,              // 请求序号，用于丢弃过期响应
     cache: new Map(),       // 运行时缓存 word -> result
     dictInfo: null,         // 后台词库信息（用于调试与 popup 回退展示）
     mouseX: 0,
     mouseY: 0,
-    frameHidden: false      // 若在不可见 iframe 中则禁用
+    frameHidden: false,      // 若在不可见 iframe 中则禁用
+    disabledSites: [],       // 站点黑名单（域名数组）
+    siteDisabled: false      // 当前站点是否在黑名单中（运行时判断）
   };
+
+  // ---------- 缓存（LRU）----------
+  // 命中时移到末尾（最近使用），写入时超上限淘汰最旧一条，
+  // 与后台 cacheGet/cacheSet 保持同一套语义。
+  function cacheGet(key) {
+    if (!state.cache.has(key)) return null;
+    const v = state.cache.get(key);
+    state.cache.delete(key);
+    state.cache.set(key, v);
+    return v;
+  }
+  function cacheSet(key, value) {
+    if (state.cache.has(key)) state.cache.delete(key);
+    state.cache.set(key, value);
+    if (state.cache.size > CACHE_MAX) {
+      const oldest = state.cache.keys().next().value;
+      state.cache.delete(oldest);
+    }
+  }
 
   // ---------- 离线查词（转发给后台）----------
   // 词形还原、两级词库优先级、词条结构组装全部在 service worker 侧完成
@@ -68,8 +104,10 @@
       let settled = false;
       const done = v => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
 
-      // 超时兜底：后台忙/正在重建时不阻塞，直接交给在线通道
-      const timer = setTimeout(() => done(null), LOCAL_LOOKUP_TIMEOUT);
+      // 超时兜底：后台忙/正在重建时不阻塞，直接交给在线通道。
+      // 冷启动期（SW 首次唤醒需重新 importScripts 解析词库）放宽到 600ms，
+      // 收到首次 SW 响应后切回 200ms。
+      const timer = setTimeout(() => done(null), localLookupCold ? COLD_LOOKUP_TIMEOUT : LOCAL_LOOKUP_TIMEOUT);
 
       let sent = false;
       try {
@@ -77,6 +115,8 @@
           { type: "HT_LOOKUP", word: word, phrases: phrases || [] },
           resp => {
             if (chrome.runtime.lastError) { done(null); return; }
+            // SW 已就绪（无论是否命中，只要回应了就说明 importScripts 完成）
+            localLookupCold = false;
             if (resp && resp.ok && resp.found && resp.result) done(resp.result);
             else done(null);
           }
@@ -110,6 +150,117 @@
   // 词组候选的最大词数：与词库构建时的上限（6 段）保持一致
   const PHRASE_MAX_WORDS = 6;
 
+  // ---------- Shadow DOM 穿透 ----------
+  // 真机实测（chromium-1234 + playwright，见 verify-shadow-dom.js）：
+  //   1) document.caretRangeFromPoint(x, y) 命中 shadow host 时返回 host 本身，
+  //      startContainer 是元素节点（DIV）而非文本节点 —— wordAtPoint 在
+  //      nodeType !== TEXT_NODE 检查处直接 return null，shadow 内文本无法取词。
+  //   2) ShadowRoot.caretRangeFromPoint 在 Chromium 上不存在（返回 null），
+  //      无法直接拿到 shadow 内的文本偏移。
+  //   3) ShadowRoot.elementFromPoint(x, y) 在 open shadow 上可用，能定位到
+  //      shadow 树内的具体元素；嵌套 shadow 需递归一层层进入。
+  //   4) closed shadow 的 shadowRoot 在外部为 null（Web 标准限制），
+  //      天然不可穿透 —— 本函数不处理 closed shadow，标准限制无解。
+
+  /**
+   * 在文本节点中找最接近 (x, y) 的字符偏移。
+   * 用单字符 range.getBoundingClientRect 判断光标落在哪个字符内。
+   * @param {Text} textNode
+   * @param {number} x 视口 x
+   * @param {number} y 视口 y
+   * @returns {{node:Text, offset:number, dist:number}|null} dist=0 表示精确命中
+   */
+  function findCaretOffset(textNode, x, y) {
+    const len = textNode.nodeValue.length;
+    if (len === 0) return null;
+    // 先用整段 rect 判断 y 是否落在该文本行（多行文本时排除非命中行）
+    const whole = document.createRange();
+    whole.selectNodeContents(textNode);
+    const wr = whole.getBoundingClientRect();
+    if (!wr || wr.height === 0) return null;
+    if (y < wr.top - 2 || y > wr.bottom + 2) return null;
+
+    // 二分查找 x 命中的字符（英文 LTR，字符按 offset 单调递增）
+    let lo = 0, hi = len;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const r = document.createRange();
+      r.setStart(textNode, mid);
+      r.setEnd(textNode, mid + 1);
+      const rect = r.getBoundingClientRect();
+      if (x < rect.left) hi = mid;
+      else if (x > rect.right) lo = mid + 1;
+      else return { node: textNode, offset: mid, dist: 0 };
+    }
+    // 二分未精确命中，取边界两侧最近的字符择优
+    const candidates = [Math.max(0, lo - 1), Math.min(len - 1, lo)];
+    let best = null;
+    for (const idx of candidates) {
+      if (idx < 0 || idx >= len) continue;
+      const r = document.createRange();
+      r.setStart(textNode, idx);
+      r.setEnd(textNode, idx + 1);
+      const rect = r.getBoundingClientRect();
+      if (!rect || rect.width === 0) continue;
+      const dx = x < rect.left ? (rect.left - x)
+               : x > rect.right ? (x - rect.right) : 0;
+      const dist = dx * dx;
+      if (!best || dist < best.dist) best = { node: textNode, offset: idx, dist };
+    }
+    return best;
+  }
+
+  /**
+   * Shadow DOM 穿透取词：拿到 shadow 内文本节点的 Range。
+   *
+   * 步骤：
+   *   1. document.elementFromPoint 拿顶层元素
+   *   2. 若 el.shadowRoot（open）存在，递归 el.shadowRoot.elementFromPoint 穿透
+   *      （depth<10 防御极限嵌套；closed shadow 的 shadowRoot 为 null 自然停下）
+   *   3. TreeWalker 收集最深层元素的文本节点
+   *   4. 对每个文本节点二分查找最接近 (x, y) 的 offset
+   *   5. 返回 startContainer 为文本节点的 Range
+   *
+   * @param {number} x 视口 x
+   * @param {number} y 视口 y
+   * @returns {Range|null} startContainer 为文本节点的 Range
+   */
+  function shadowCaretFromPoint(x, y) {
+    let el = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+    if (!el) return null;
+
+    // 递归穿透 open shadow（closed shadow 的 shadowRoot 为 null，自然停下）
+    let depth = 0;
+    while (el && el.shadowRoot && depth < 10) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+      depth++;
+    }
+    if (!el) return null;
+
+    // 在 el 子树内收集文本节点，找最接近 (x, y) 的字符位置
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    let best = null;
+    let tn;
+    while ((tn = walker.nextNode())) {
+      const value = tn.nodeValue;
+      if (!value || !/[A-Za-z]/.test(value)) continue;
+      const hit = findCaretOffset(tn, x, y);
+      if (!hit) continue;
+      if (!best || hit.dist < best.dist) {
+        best = hit;
+        if (best.dist === 0) break;   // 精确命中，无需继续遍历
+      }
+    }
+    if (!best) return null;
+
+    const range = document.createRange();
+    range.setStart(best.node, best.offset);
+    range.setEnd(best.node, best.offset);
+    return range;
+  }
+
   /**
    * 从鼠标位置取「词」或「词组」。
    *
@@ -137,6 +288,16 @@
         range.setStart(pos.offsetNode, pos.offset);
         range.setEnd(pos.offsetNode, pos.offset);
       }
+    }
+    // Shadow DOM fallback：caretRangeFromPoint 命中 shadow host 时
+    // startContainer 是元素节点（DIV）而非文本节点，下面 L177 会 return null。
+    // 改为先探测 startContainer 是否为文本节点，不是则 fallback 到
+    // shadowCaretFromPoint（递归 shadowRoot.elementFromPoint + 二分定位）。
+    // 真机实测见 verify-shadow-dom.js；closed shadow 因标准限制不处理。
+    if (!range || !range.startContainer ||
+        range.startContainer.nodeType !== Node.TEXT_NODE) {
+      const shadowRange = shadowCaretFromPoint(x, y);
+      if (shadowRange) range = shadowRange;
     }
     if (!range) return null;
 
@@ -265,17 +426,6 @@
     return out;
   }
 
-  // 忽略不该取词的区域
-  function isIgnoredTarget(el) {
-    if (!el || !el.tagName) return false;
-    const tag = el.tagName.toLowerCase();
-    if (["script", "style", "noscript", "textarea", "code", "pre", "svg", "canvas", "input"].includes(tag)) {
-      return tag !== "pre" && tag !== "code"; // pre/code 允许（技术文档常需翻译）
-    }
-    if (el.isContentEditable) return false;
-    return false;
-  }
-
   // ---------- 气泡 ----------
   function ensureBubble() {
     if (state.bubble && document.body.contains(state.bubble)) return state.bubble;
@@ -287,13 +437,50 @@
       if (state.hideTimer) { clearTimeout(state.hideTimer); state.hideTimer = null; }
     });
     el.addEventListener("mouseleave", () => scheduleHide(120));
+    // 事件委托：发音按钮点击（按钮随 innerHTML 重建，不能用直接 addEventListener）
+    el.addEventListener("click", e => {
+      const btn = e.target.closest && e.target.closest(".ht-tts");
+      if (!btn) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const w = btn.getAttribute("data-word") || state.currentTtsWord;
+      if (w) speakWord(w);
+    });
     document.body.appendChild(el);
     state.bubble = el;
     return el;
   }
 
+  /**
+   * 发音按钮内联 SVG（小喇叭）。
+   * 用 SVG 而非 Unicode 表情：在所有字号下都能保持像素清晰，
+   * 且与气泡深色主题色调一致。
+   */
+  const TTS_ICON_SVG =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M3 5.5h1.7l2.6-2.1c.4-.3.97-.02.97.46v6.28c0 .48-.57.76-.97.46L4.7 8.5H3' +
+    'a.5.5 0 0 1-.5-.5v-2A.5.5 0 0 1 3 5.5z" fill="currentColor"/>' +
+    '<path d="M10.2 4.6c2.06.94 2.06 6.86 0 7.8M11.6 2.9c3.5 1.6 3.5 9.6 0 11.2" ' +
+    'fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>';
+
+  /**
+   * 朗读单词：发消息到后台，由后台 chrome.tts.speak 执行。
+   * 在 service worker 里调用是因为 content script 没法直接用 chrome.tts API。
+   */
+  function speakWord(word) {
+    if (!word) return;
+    try {
+      chrome.runtime.sendMessage({ type: "HT_TTS", word: word }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (_) {
+      // 扩展重载后旧页面残留脚本会同步抛 "Extension context invalidated"
+    }
+  }
+
   function renderLoading(word, text) {
     const el = ensureBubble();
+    state.currentTtsWord = "";   // 加载中无发音目标，清空防止旧值误读
     el.innerHTML =
       '<div class="ht-word">' + escapeHtml(word) + '</div>' +
       '<div class="ht-loading">' + escapeHtml(text || "查询中…") + '</div>';
@@ -304,11 +491,20 @@
     const el = ensureBubble();
     let html = "";
 
-    const head = '<span class="ht-word">' + escapeHtml(res.display || res.word) + "</span>";
+    const displayWord = res.display || res.word || "";
+    // 发音按钮：默认开启，可由 popup 关闭。发音频时存到 currentTtsWord，
+    // 供气泡事件委托兜底（按钮被 innerHTML 重建时 data-word 仍可读）。
+    state.currentTtsWord = displayWord || "";
+    const tts = (state.showTts && displayWord)
+      ? '<span class="ht-tts" data-ht-owner="1" data-word="' + escapeHtml(displayWord) +
+        '" role="button" tabindex="0" title="点击朗读">' + TTS_ICON_SVG + "</span>"
+      : "";
+
+    const head = '<span class="ht-word">' + escapeHtml(displayWord) + "</span>";
     const phon = (state.showPhonetic && res.phonetic)
       ? '<span class="ht-phonetic">' + escapeHtml(res.phonetic) + "</span>"
       : "";
-    html += '<div class="ht-head">' + head + phon + "</div>";
+    html += '<div class="ht-head">' + head + phon + tts + "</div>";
 
     // 还原提示：如 running -> run
     if (res.inflected && res.matched && res.matched !== (res.display || res.word).toLowerCase()) {
@@ -350,6 +546,7 @@
 
   function renderError(word, msg) {
     const el = ensureBubble();
+    state.currentTtsWord = "";   // 出错时不提供发音
     el.innerHTML =
       '<div class="ht-head"><span class="ht-word">' + escapeHtml(word) + "</span></div>" +
       '<div class="ht-body"><div class="ht-row"><span class="ht-def ht-err">' +
@@ -417,7 +614,7 @@
       (phrases.length ? phrases[phrases.length - 1] : "");
 
     // 命中缓存
-    const cached = state.cache.get(key);
+    const cached = cacheGet(key);
     if (cached) {
       renderResult(cached);
       showBubble();
@@ -432,7 +629,7 @@
     if (seq !== state.reqSeq) return; // 已被更晚的请求取代（鼠标已移到别的词）
 
     if (local) {
-      state.cache.set(key, local);
+      cacheSet(key, local);
       renderResult(local);
       showBubble();
       return;
@@ -450,7 +647,7 @@
       return;
     }
 
-    requestOnline(rawWord, seq);
+    requestOnline(rawWord, seq, false, key);
   }
 
   /**
@@ -463,8 +660,12 @@
    * 静默重试一次并让后台放宽超时预算（2.5s/3s）。国内网络下在线通道
    * 经常在 700ms 边缘抖动，重试能吃掉绝大多数偶发失败——
    * 之前「有时报错、再悬停又正常」就是这个原因。
+   *
+   * @param {string} cacheKey 内容侧缓存键（单词 + 最长词组候选的复合键），
+   *   必须与 translateWord 读缓存用的键完全一致——在线结果曾误用纯单词键
+   *   写入，导致同一 Map 读写两套键、在线缓存永不命中。
    */
-  function requestOnline(rawWord, seq, isRetry) {
+  function requestOnline(rawWord, seq, isRetry, cacheKey) {
     const loadingTimer = setTimeout(() => {
       if (seq !== state.reqSeq) return;
       renderLoading(rawWord, isRetry ? "网络较慢，重试中…" : undefined);
@@ -486,7 +687,7 @@
           if (!resp || !resp.ok) {
             // 第一次失败：静默重试一次（放宽超时），不打扰用户
             if (!isRetry) {
-              requestOnline(rawWord, seq, true);
+              requestOnline(rawWord, seq, true, cacheKey);
               return;
             }
             renderError(rawWord, (resp && resp.error) || "在线翻译失败");
@@ -501,7 +702,9 @@
             source: "online",
             channel: resp.source || ""   // google / mymemory，用于气泡角标显示
           };
-          state.cache.set(rawWord.toLowerCase(), res);
+          // 写入键与 translateWord 的读取键保持同一个复合键，
+          // 否则第二次悬停读不到、在线缓存形同虚设。
+          cacheSet(cacheKey, res);
           renderResult(res);
           showBubble();
         }
@@ -521,7 +724,7 @@
       positionBubble(state.bubble);
     }
 
-    if (!state.enabled || state.frameHidden) return;
+    if (!state.enabled || state.frameHidden || state.siteDisabled) return;
     // 指针位于悬浮球/气泡上：不取词，也不重置计时
     const t = e.target;
     if (t && t.closest && t.closest("[data-ht-owner]")) return;
@@ -578,6 +781,95 @@
   function onScroll() { hideBubble(); }
   function onKeyDown(e) {
     if (e.key === "Escape") hideBubble();
+  }
+
+  // ---------- 划词 / 双击查询（v1.5.0） ----------
+  //
+  // 设计：仅监听 mouseup（不论单击/双击/拖选，松开鼠标时 selection 已确定）。
+  //   - 拖选多个词：mouseup 时 sel.toString() 是整段，走 HT_TRANSLATE
+  //   - 双击单词：浏览器选中单词，mouseup 时 sel.toString() 是该词，走 HT_LOOKUP
+  //   - 普通单击：sel.isCollapsed 为真，跳过
+  // 不绑 dblclick：dblclick 在 mouseup 之后才触发，会重复查询；用 mouseup 单一信号即可。
+  // 不绑 selectionchange：该事件在拖动中频繁触发，必须配合 mouseup 才有意义，徒增噪音。
+  //
+  // 与悬停的差异：
+  //   - 划词查询不受 siteDisabled 限制（用户主动选词，即使站点停用悬停也应能查）
+  //   - 气泡位置锚定到选区下方，不跟随鼠标
+  //   - 选中文本若包含非英文字母（中文/数字主导），跳过——避免选中文段落就触发
+  function onMouseUp(e) {
+    if (!state.enabled || !state.enableSelection || state.frameHidden) return;
+    // 鼠标抬起位置在自己气泡/悬浮球上 → 跳过（否则点气泡内文字会触发查询）
+    const t = e.target;
+    if (t && t.closest && t.closest("[data-ht-owner]")) return;
+    // 延迟 50ms：给浏览器完成选区更新（mouseup 时 selection 可能尚未刷新）
+    setTimeout(querySelection, 50);
+  }
+
+  /**
+   * 取当前选区文本，去标点 → 决定走单词查词库还是整句走在线。
+   * 单词（1 段）：复用 translateWord 流程，命中本地词库或在线兜底
+   * 多词（≥2 段）：直接走 HT_TRANSLATE（单词组合不是固定词组，词库不会收录）
+   */
+  function querySelection() {
+    const sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const raw = String(sel.toString() || "").trim();
+    if (!raw) return;
+
+    // 去掉前后标点（保留中间的标点以判断句子边界）
+    const cleaned = raw
+      .replace(/^[\s.,;:!?'""''(){}\[\]<>-]+|[\s.,;:!?'""''(){}\[\]<>-]+$/g, "")
+      .trim();
+    if (!cleaned) return;
+    // 必须以英文字母开头（避免选中整段中文也触发）
+    if (!/^[A-Za-z]/.test(cleaned)) return;
+    if (cleaned.length > 200) return;  // 过长不查询
+
+    // 去重：刚刚查过的不再查（双击后 mouseup 触发的二次 selection 同文）
+    const ck = cleaned.toLowerCase();
+    if (ck === state.lastSelectionKey) return;
+    state.lastSelectionKey = ck;
+
+    // 选区位置：气泡底部对齐到选区下方
+    let rect = null;
+    try {
+      const range = sel.getRangeAt(0);
+      rect = range.getBoundingClientRect();
+    } catch (_) {}
+    if (!rect || rect.width === 0 || rect.height === 0) return;
+
+    state.mouseX = rect.left + rect.width / 2;
+    state.mouseY = rect.bottom + 4;
+
+    // 单词 vs 多词
+    const segs = cleaned.split(/\s+/).filter(s => /[A-Za-z]/.test(s));
+    if (segs.length === 0) return;
+
+    // 更新当前展示键，避免同一选区被悬停逻辑误判为"已展示"而跳过
+    const phrases = [];
+    state.currentWord = ck + "\u0000";
+
+    if (segs.length === 1) {
+      // 单词：走完整的 translateWord 流程（含本地查词 + 在线兜底 + 缓存）
+      translateWord(segs[0], phrases).catch(() => {});
+    } else {
+      // 多词：直接发 HT_TRANSLATE（词库不收录任意组合）
+      if (!state.onlineFallback) {
+        renderResult({
+          word: cleaned, display: cleaned, groups: [],
+          plain: "划词翻译需开启在线兜底", source: "local"
+        });
+        showBubble();
+        return;
+      }
+      // 不命中缓存时先显示加载态，再请求在线
+      const key = ck + "\u0000";
+      const cached = cacheGet(key);
+      if (cached) { renderResult(cached); showBubble(); return; }
+      renderLoading(cleaned, "查询中…");
+      showBubble();
+      requestOnline(cleaned, ++state.reqSeq, false, key);
+    }
   }
 
   // ---------- 悬浮球 ----------
@@ -637,17 +929,41 @@
     return true;
   }
 
+  /**
+   * 判断当前站点是否在黑名单中。
+   * 匹配规则：精确匹配 或 后缀匹配（example.com 匹配 www.example.com）。
+   * 不匹配 notexample.com（必须是完整域名段，点号分隔）。
+   */
+  function isSiteDisabled() {
+    var host;
+    try { host = location.hostname; } catch (_) { return false; }
+    if (!host || !state.disabledSites || !state.disabledSites.length) return false;
+    return state.disabledSites.some(function (site) {
+      if (!site || typeof site !== "string") return false;
+      if (host === site) return true;
+      // 后缀匹配：example.com 匹配 www.example.com，但不匹配 notexample.com
+      return host.length > site.length + 1 &&
+             host.charAt(host.length - site.length - 1) === "." &&
+             host.endsWith(site);
+    });
+  }
+
   function loadSettings() {
     chrome.storage.sync.get(
-      { enabled: true, onlineFallback: true, showPhonetic: true, hoverDelay: 320, showBall: true },
+      { enabled: true, onlineFallback: true, showPhonetic: true, showTts: true, enableSelection: true, hoverDelay: 320, showBall: true, disabledSites: [] },
       cfg => {
         if (chrome.runtime.lastError) return;
         state.enabled = cfg.enabled !== false;
         state.onlineFallback = cfg.onlineFallback !== false;
         state.showPhonetic = cfg.showPhonetic !== false;
-        state.hoverDelay = Math.max(80, Number(cfg.hoverDelay) || 320);
+        state.showTts = cfg.showTts !== false;
+        state.enableSelection = cfg.enableSelection !== false;
+        state.hoverDelay = Math.min(900, Math.max(80, Number(cfg.hoverDelay) || 320));
+        state.showBall = cfg.showBall !== false;
+        state.disabledSites = Array.isArray(cfg.disabledSites) ? cfg.disabledSites : [];
+        state.siteDisabled = isSiteDisabled();
         updateBall();
-        if (cfg.showBall) ensureBall();
+        if (cfg.showBall && !state.siteDisabled) ensureBall();
       }
     );
   }
@@ -658,10 +974,26 @@
       if (changes.enabled) setEnabled(changes.enabled.newValue !== false, false);
       if (changes.onlineFallback) state.onlineFallback = changes.onlineFallback.newValue !== false;
       if (changes.showPhonetic) state.showPhonetic = changes.showPhonetic.newValue !== false;
-      if (changes.hoverDelay) state.hoverDelay = Math.max(80, Number(changes.hoverDelay.newValue) || 320);
+      if (changes.showTts) state.showTts = changes.showTts.newValue !== false;
+      if (changes.enableSelection) state.enableSelection = changes.enableSelection.newValue !== false;
+      if (changes.hoverDelay) state.hoverDelay = Math.min(900, Math.max(80, Number(changes.hoverDelay.newValue) || 320));
       if (changes.showBall) {
+        state.showBall = changes.showBall.newValue !== false;
         if (changes.showBall.newValue) ensureBall();
         else if (state.ball) { state.ball.remove(); state.ball = null; }
+      }
+      if (changes.disabledSites) {
+        state.disabledSites = Array.isArray(changes.disabledSites.newValue) ? changes.disabledSites.newValue : [];
+        const wasDisabled = state.siteDisabled;
+        state.siteDisabled = isSiteDisabled();
+        if (state.siteDisabled !== wasDisabled) {
+          if (state.siteDisabled) {
+            hideBubble();
+            if (state.ball) { state.ball.remove(); state.ball = null; }
+          } else {
+            if (state.showBall) ensureBall();
+          }
+        }
       }
     });
   }
@@ -689,12 +1021,14 @@
     loadSettings();
     if (state.frameHidden) return;
 
-    ensureBall();
+    // 悬浮球注入由 loadSettings 回调统一决定（根据 showBall + siteDisabled），
+    // 避免「先注入再移除」的闪烁。
     listenStorage();
     listenMessages();
     probeDictInfo();
 
     document.addEventListener("mousemove", onMouseMove, { passive: true, capture: true });
+    document.addEventListener("mouseup", onMouseUp, true);
     document.addEventListener("mouseout", onMouseOutWindow, true);
     document.addEventListener("scroll", onScroll, true);
     document.addEventListener("keydown", onKeyDown, true);
@@ -725,7 +1059,8 @@
         state.dictInfo = resp;
         try {
           console.info("[悬停取词翻译] 离线词库已就绪：精选 " + resp.core +
-            " 条 + 扩展 " + resp.extra + " 条 = " + resp.total + " 条（由后台统一持有）");
+            " 条 + 扩展 " + resp.extra + " 条 + 词组 " + (resp.phrase || 0) +
+            " 条 = " + resp.total + " 条（由后台统一持有）");
         } catch (_) {}
       });
     } catch (_) {}

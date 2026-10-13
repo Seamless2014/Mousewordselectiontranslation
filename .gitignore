@@ -1,4 +1,5 @@
-# 依赖与构建产物（本项目测试依赖装在全局隔离环境，不在仓库内）
+# 依赖与构建产物
+# 本地 npm install 装的依赖不入库；run-tests.js 也会 fallback 到托管环境
 node_modules/
 package-lock.json
 
@@ -15,5 +16,6 @@ Thumbs.db
 _*.js
 *.log
 
-# 验收脚本的生成物（每次运行结果不同，仅本地查看见 verify-browser.js）
+# 验收脚本的生成物（每次运行结果不同，仅本地查看见 verify-browser.js / verify-v150.js）
 verify-browser-result.json
+verify-v150-result.json

@@ -1,0 +1,12 @@
+{
+  "name": "hover-translate",
+  "version": "1.5.0",
+  "description": "悬停取词翻译（Manifest V3 浏览器扩展）",
+  "private": true,
+  "scripts": {
+    "test": "node run-tests.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.0"
+  }
+}
