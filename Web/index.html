@@ -6,7 +6,105 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>悬停取词翻译 — 鼠标悬停，即时翻译英文单词</title>
 <meta name="description" content="浏览器扩展，鼠标悬停在英文单词或词组上自动显示中文释义。内置 13.4 万条离线词条，移开自动消失，不打断阅读。">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">
+<meta name="keywords" content="悬停翻译,鼠标悬停翻译,划词翻译,浏览器翻译扩展,Chrome 翻译扩展,Edge 翻译扩展,离线词典,英文阅读,hover translate,hover dictionary,browser translation extension">
+<meta name="application-name" content="悬停取词翻译">
+<!-- Open Graph（og:url/og:image 由服务端按 config.siteUrl 注入，未配置域名时不输出） -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="悬停取词翻译">
+<meta property="og:title" content="悬停取词翻译 — 鼠标悬停，即时翻译英文单词">
+<meta property="og:description" content="浏览器扩展，鼠标悬停在英文单词或词组上自动显示中文释义。内置 13.4 万条离线词条，移开自动消失，不打断阅读。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:locale:alternate" content="en_US">
+<meta property="og:url" content="__SITE_URL__/">
+<meta property="og:image" content="__SITE_URL__/_shared/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="悬停取词翻译 — 鼠标悬停，即时翻译英文单词">
+<meta name="twitter:description" content="浏览器扩展，鼠标悬停在英文单词或词组上自动显示中文释义。内置 13.4 万条离线词条，移开自动消失。">
+<meta name="twitter:image" content="__SITE_URL__/_shared/og-image.png">
+<link rel="canonical" href="__SITE_URL__/">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234a8cff'/><text x='50' y='68' font-size='52' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='white'>译</text></svg>">
+<!-- 结构化数据：仅使用页面真实事实（版本 1.5.0 / 词库构成 / 免费开源），不含编造的评分或下载量 -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "悬停取词翻译",
+      "alternateName": ["Hover Translate", "Mousewordselectiontranslation"],
+      "applicationCategory": "BrowserApplication",
+      "operatingSystem": "Chrome, Edge (Chromium, Manifest V3)",
+      "softwareVersion": "1.5.0",
+      "inLanguage": ["zh-CN", "en"],
+      "description": "浏览器扩展，鼠标悬停在英文单词或词组上自动显示中文释义。内置 13.4 万条离线词条，移开自动消失，不打断阅读。",
+      "featureList": [
+        "悬停即译：约 320ms 触发释义气泡，移开自动消失，触发延迟 80–900ms 可调",
+        "离线词库：13.4 万条分层词库（精选 940 条 + 扩展 47,370 条 + 词组 85,867 条），断网可用",
+        "在线兜底：Google 主通道 + MyMemory 备用通道，可关闭实现完全离线",
+        "合成词拆词：decision-maker / real-time / mother-in-law 自动拆段本地查询",
+        "词形还原：implementations → implementation、running → run、analyses → analysis",
+        "单词发音：浏览器内置 TTS，en-US 朗读",
+        "划词查询：选中页面文字自动查询",
+        "站点黑名单：一键禁用悬停取词，跨设备同步",
+        "生词本：自动收录查词记录，上限 1000 条，支持导出 CSV，仅本地存储",
+        "内存恒定：词库由 Service Worker 统一持有，不随标签页增长"
+      ],
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
+      "isAccessibleForFree": true,
+      "sameAs": "https://github.com/Seamless2014/Mousewordselectiontranslation"
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "悬停不出气泡怎么办？",
+          "acceptedAnswer": { "@type": "Answer", "text": "多数情况是装完扩展后没有刷新页面——内容脚本只在页面加载时注入，已打开的页面不会自动获得脚本。按 F5 刷新即可。另外，chrome://、edge://、扩展商店页等受限页面禁止注入内容脚本，这是浏览器硬限制，请换普通网站（如 en.wikipedia.org）测试。" }
+        },
+        {
+          "@type": "Question",
+          "name": "本地词库能覆盖多少单词？",
+          "acceptedAnswer": { "@type": "Answer", "text": "合计 13.4 万条：精选单词 940 条（手工维护）+ 扩展单词 47,370 条（ECDICT 高频词，带音标）+ 常用词组 85,867 条。覆盖日常、学术、技术、商务高频词。极生僻词和最新术语依赖在线兜底。" }
+        },
+        {
+          "@type": "Question",
+          "name": "在线兜底翻译会泄露我的查词内容吗？",
+          "acceptedAnswer": { "@type": "Answer", "text": "在线兜底使用 Google 免费端点和 MyMemory 公共接口，无需注册和 API Key。如果你对隐私有要求，可以在设置中关闭「在线兜底翻译」，此后扩展完全离线运行，不发出任何网络请求。生词本数据仅存储在本地 chrome.storage，不上传任何服务器。" }
+        },
+        {
+          "@type": "Question",
+          "name": "为什么有些词组只翻译了一部分？",
+          "acceptedAnswer": { "@type": "Answer", "text": "词组按词数由短到长匹配。例如悬停 out of the blue 中的 blue，会先命中较短的 out of。这是有意为之——短搭配（as soon as、account for）本身就是合法释义单元。若想看到完整词组，把鼠标停在词组的最后一个词上即可。" }
+        },
+        {
+          "@type": "Question",
+          "name": "支持哪些浏览器？",
+          "acceptedAnswer": { "@type": "Answer", "text": "支持 Chrome 和 Edge（基于 Chromium 的浏览器），使用 Manifest V3 规范。需要浏览器版本支持 Service Worker 和 chrome.storage API。Firefox 暂未官方适配。" }
+        },
+        {
+          "@type": "Question",
+          "name": "生词本的数据会丢失吗？",
+          "acceptedAnswer": { "@type": "Answer", "text": "生词本存储在 chrome.storage.local，仅本地保存。上限 1000 条，超出后淘汰最旧记录。你可以随时在 popup 中导出为 CSV 文件备份。卸载扩展会清除本地数据，建议定期导出。" }
+        }
+      ]
+    },
+    {
+      "@type": "HowTo",
+      "name": "下载并安装悬停取词翻译扩展",
+      "totalTime": "PT3M",
+      "step": [
+        { "@type": "HowToStep", "position": 1, "name": "解压下载的 ZIP", "text": "将下载的 hover-translate-extension.zip 解压到任意文件夹（记住该路径）。" },
+        { "@type": "HowToStep", "position": 2, "name": "打开扩展管理页", "text": "在 Chrome 地址栏输入 chrome://extensions（Edge 为 edge://extensions）。" },
+        { "@type": "HowToStep", "position": 3, "name": "开启开发者模式", "text": "点击右上角的「开发者模式」开关，使其处于开启状态。" },
+        { "@type": "HowToStep", "position": 4, "name": "加载已解压的扩展", "text": "点击「加载已解压的扩展程序」，选择第 1 步解压后的文件夹，完成安装。" }
+      ]
+    }
+  ]
+}
+</script>
 <style>
 /* ============ Fonts ============ */
 @font-face {

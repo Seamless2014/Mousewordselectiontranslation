@@ -25,6 +25,10 @@ const WEB_ROOT = path.join(__dirname, '..'); // Web/
 const PORT = Number(config.port) || 8090;
 const MAX_BODY = 8 * 1024; // 埋点 body 上限 8KB
 
+/* SEO/GEO：站点对外 URL（部署后填入 config.json 的 siteUrl，如 https://example.com）。
+ * 为空时页面不输出 canonical/og:url 等绝对地址，避免编造域名。 */
+const SITE_URL = String(config.siteUrl || '').trim().replace(/\/+$/, '');
+
 /* ---------------- 登录令牌 ---------------- */
 
 /** @type {Map<string, number>} token -> 到期时间戳 */
@@ -160,7 +164,65 @@ const MIME = {
   '.woff2': 'font/woff2',
   '.zip': 'application/zip',
   '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
+
+/** SEO 注入：对 index.html 做 __SITE_URL__ 占位替换。
+ *  已配置 siteUrl → 替换为真实域名；未配置 → 剔除含占位符的整行（不输出编造的绝对 URL）。 */
+function renderIndex(buf) {
+  let html = buf.toString('utf8');
+  if (SITE_URL) {
+    html = html.split('__SITE_URL__').join(SITE_URL);
+  } else {
+    html = html.split('\n').filter((line) => !line.includes('__SITE_URL__')).join('\n');
+  }
+  return Buffer.from(html, 'utf8');
+}
+
+/** 动态 robots.txt：全站可抓取，后台与 API 禁止索引 */
+function serveRobots(res) {
+  const lines = [
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /admin.html',
+    'Disallow: /admin.js',
+    'Disallow: /api/',
+    '',
+  ];
+  if (SITE_URL) lines.push('Sitemap: ' + SITE_URL + '/sitemap.xml', '');
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'public, max-age=3600',
+  });
+  res.end(lines.join('\n'));
+}
+
+/** 动态 sitemap.xml：仅站点首页一个 URL（站内其余为后台/静态资源，不应被索引） */
+function serveSitemap(res) {
+  if (!SITE_URL) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found (siteUrl not configured)');
+    return;
+  }
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const today = new Date().toISOString().slice(0, 10);
+  const xml =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+    '  <url>\n' +
+    '    <loc>' + esc(SITE_URL) + '/</loc>\n' +
+    '    <lastmod>' + today + '</lastmod>\n' +
+    '    <changefreq>weekly</changefreq>\n' +
+    '    <priority>1.0</priority>\n' +
+    '  </url>\n' +
+    '</urlset>\n';
+  res.writeHead(200, {
+    'Content-Type': 'application/xml; charset=utf-8',
+    'Cache-Control': 'public, max-age=3600',
+  });
+  res.end(xml);
+}
 
 function serveStatic(req, res, pathname) {
   try {
@@ -170,9 +232,32 @@ function serveStatic(req, res, pathname) {
     if (decoded === '/server' || decoded.startsWith('/server/')) return sendErr(res, 403, '禁止访问');
     if (decoded.includes('/data/') || decoded.endsWith('/config.json')) return sendErr(res, 403, '禁止访问');
 
+    // SEO/GEO：robots.txt 与 sitemap.xml 按配置动态生成
+    if (decoded === '/robots.txt') return serveRobots(res);
+    if (decoded === '/sitemap.xml') return serveSitemap(res);
+
     let rel = decoded === '/' ? '/index.html' : decoded;
     const full = path.normalize(path.join(WEB_ROOT, rel));
     if (!full.startsWith(WEB_ROOT)) return sendErr(res, 403, '禁止访问');
+
+    // 首页需要做 __SITE_URL__ 占位注入，走内存读取
+    if (path.basename(full).toLowerCase() === 'index.html') {
+      fs.readFile(full, (err, buf) => {
+        if (err || !buf) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('404 Not Found');
+          return;
+        }
+        const body = renderIndex(buf);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': body.length,
+          'Cache-Control': 'no-cache',
+        });
+        res.end(body);
+      });
+      return;
+    }
 
     fs.stat(full, (err, st) => {
       if (err || !st.isFile()) {

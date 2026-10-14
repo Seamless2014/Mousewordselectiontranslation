@@ -1,0 +1,53 @@
+# 悬停取词翻译 (Hover Translate)
+
+> Chrome/Edge 浏览器扩展：鼠标悬停在英文单词或词组上，约 320ms 后自动弹出中文释义气泡，移开自动消失，不打断阅读。内置 13.4 万条离线词条，免费开源，当前版本 v1.5.0。
+
+Hover Translate is a free, open-source Chrome/Edge (Manifest V3) browser extension that instantly shows Chinese definitions when you hover over English words or phrases. The bubble appears in ~320ms and disappears when the cursor moves away. 134K offline dictionary entries are built in, so it works without internet. Current version: v1.5.0.
+
+## 核心事实 (Key Facts)
+
+- 类型：浏览器扩展（Chrome / Edge，Chromium 内核，Manifest V3）
+- 当前版本：v1.5.0
+- 价格：完全免费
+- 源码：开源（https://github.com/Seamless2014/Mousewordselectiontranslation ）
+- 词典数据来源：ECDICT（MIT License，https://github.com/skywind3000/ECDICT ）
+- 词库构成：精选单词 940 条（手工维护）+ 扩展单词 47,370 条（含音标）+ 常用词组 85,867 条，合计约 13.4 万条
+- 隐私：关闭在线兜底后完全离线、零网络请求；生词本仅存本地 chrome.storage，不上传任何服务器
+- 内存：词库由 Service Worker 统一持有，100 个 frame 场景实测约 9.5 MB，不随标签页数量增长
+
+## 核心能力 (Core Features)
+
+- 悬停即译：鼠标停在单词/词组上约 320ms 弹出中文释义，触发延迟 80–900ms 可调，Esc 立即关闭
+- 词组识别：同一段落内换词可持续翻译；词组按词数由短到长分层匹配
+- 合成词拆词：decision-maker / real-time / mother-in-law 自动拆段后走本地词库
+- 词形还原：implementations → implementation、running → run、analyses → analysis（不规则动词表 + 后缀规则）
+- 在线兜底：本地未收录的词经 Google 免费端点翻译，MyMemory 为备用通道，可在设置中关闭
+- 单词发音：气泡内按钮触发 en-US TTS 朗读
+- 划词查询：选中页面文字自动查询，单词走本地词库，多词走在线通道
+- 站点黑名单：一键禁用当前站点悬停取词（划词查询豁免），跨设备同步
+- 生词本：查词自动收录，上限 1000 条，支持查看 / 删除 / 清空 / 导出 CSV
+- 悬浮球：可拖拽，位置自动记忆；提供右键菜单与快捷键 Alt+Shift+T 开关
+
+## 安装方法 (How to Install)
+
+1. 下载 hover-translate-extension.zip 并解压到任意文件夹
+2. 打开浏览器扩展管理页：chrome://extensions（Edge 为 edge://extensions）
+3. 开启右上角「开发者模式」开关
+4. 点击「加载已解压的扩展程序」，选择解压后的文件夹完成安装
+5. 安装后刷新已打开的英文网页即可使用
+
+## 常见问题 (FAQ)
+
+- 悬停不出气泡？多数是装完扩展后未刷新页面（内容脚本仅在页面加载时注入），按 F5 即可；chrome://、edge:// 等受限页面禁止注入，属浏览器硬限制。
+- 本地词库覆盖多少词？合计约 13.4 万条，覆盖日常、学术、技术、商务高频词；极生僻词依赖在线兜底。
+- 在线兜底会泄露查词内容吗？使用 Google 免费端点与 MyMemory 公共接口，无需 API Key；可在设置中关闭，关闭后完全离线。
+- 为什么有些词组只翻译了一部分？词组按词数由短到长匹配（如先命中 out of 而非 out of the blue），把鼠标停在词组最后一个词上即可命中完整词组。
+- 支持哪些浏览器？Chrome 与 Edge（Chromium，MV3）；Firefox 暂未适配。
+- 生词本数据会丢失吗？存储于 chrome.storage.local，仅本地；卸载扩展会清除，建议定期导出 CSV 备份。
+
+## 链接 (Links)
+
+- 源码仓库：https://github.com/Seamless2014/Mousewordselectiontranslation
+- 扩展安装包：/hover-translate-extension.zip（本站直接下载）
+- 词典数据：https://github.com/skywind3000/ECDICT
+- 本站首页：/（含功能介绍、使用方式、安装指南与完整 FAQ）
