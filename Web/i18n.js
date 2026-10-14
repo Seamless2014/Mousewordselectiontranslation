@@ -149,6 +149,18 @@
     "生词本的数据会丢失吗？": "Will my vocabulary book data be lost?",
     "生词本存储在 chrome.storage.local，仅本地保存。上限 1000 条，超出后淘汰最旧记录。你可以随时在 popup 中导出为 CSV 文件备份。卸载扩展会清除本地数据，建议定期导出。": "The vocabulary book is stored in chrome.storage.local, locally only. The limit is 1000 entries, beyond which the oldest records are dropped. You can export it to a CSV file for backup from the popup at any time. Uninstalling the extension clears local data, so regular exports are recommended.",
 
+    /* ---- 首页：联系我们 ---- */
+    "联系我们": "Contact Us",
+    "遇到问题或有合作意向？": "Questions or interested in working together?",
+    "通过以下任意方式联系作者，我们会尽快回复。": "Reach the author through either channel below — we'll reply as soon as we can.",
+    "QQ 邮箱": "QQ Mail",
+    "微信": "WeChat",
+    "复制邮箱": "Copy email",
+    "已复制": "Copied",
+    "请手动复制": "Please copy manually",
+    "微信扫码添加作者": "Scan the QR code to add the author on WeChat",
+    "微信二维码": "WeChat QR code",
+
     /* ---- 首页：页脚 ---- */
     "产品": "Product",
     "资源": "Resources",
@@ -244,7 +256,7 @@
     "guideStep2": "Type <code>chrome://extensions</code> in the Chrome address bar (or <code>edge://extensions</code> in Edge)."
   };
 
-  var ATTRS = ['placeholder', 'title', 'aria-label'];
+  var ATTRS = ['placeholder', 'title', 'aria-label', 'alt'];
 
   /* ============ 工具 ============ */
 
