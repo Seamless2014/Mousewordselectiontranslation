@@ -150,6 +150,27 @@ body::before {
   transform: translateY(-1px);
   box-shadow: 0 6px 20px rgba(74, 140, 255, 0.45);
 }
+.nav-right { display: flex; align-items: center; gap: 14px; }
+.lang-switch {
+  display: inline-flex;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+}
+.lang-switch button {
+  border: none;
+  background: none;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  border-radius: 999px;
+  transition: color 0.15s;
+}
+.lang-switch button:hover { color: var(--ink); }
+.lang-switch button.on { background: var(--accent-grad); color: #fff; }
 @media (max-width: 768px) {
   .nav-links { display: none; }
 }
@@ -882,7 +903,10 @@ body::before {
       <a href="#faq">常见问题</a>
       <a href="https://github.com/Seamless2014/Mousewordselectiontranslation" target="_blank" rel="noopener">GitHub</a>
     </div>
-    <a href="#install" class="nav-cta">立即安装</a>
+    <div class="nav-right">
+      <div class="lang-switch" id="langSwitch"></div>
+      <a href="#install" class="nav-cta">立即安装</a>
+    </div>
   </div>
 </nav>
 
@@ -1235,14 +1259,14 @@ body::before {
           <div class="guide-step-num">1</div>
           <div class="guide-step-body">
             <h4>解压下载的 ZIP</h4>
-            <p>将下载的 <code>hover-translate-extension.zip</code> 解压到任意文件夹（记住该路径）。</p>
+            <p data-i18n-html="guideStep1">将下载的 <code>hover-translate-extension.zip</code> 解压到任意文件夹（记住该路径）。</p>
           </div>
         </div>
         <div class="guide-step">
           <div class="guide-step-num">2</div>
           <div class="guide-step-body">
             <h4>打开扩展管理页</h4>
-            <p>在 Chrome 地址栏输入 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>）。</p>
+            <p data-i18n-html="guideStep2">在 Chrome 地址栏输入 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>）。</p>
           </div>
         </div>
         <div class="guide-step">
@@ -1428,6 +1452,9 @@ window.addEventListener('scroll', () => {
   }
 });
 </script>
+
+<!-- 中英文切换 -->
+<script src="i18n.js" defer></script>
 
 <!-- 访客统计埋点（仅页面访问一次，无 Cookie/第三方） -->
 <script src="tracker.js" defer></script>

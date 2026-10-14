@@ -6,10 +6,12 @@
   'use strict';
 
   var TOKEN_KEY = 'ht_admin_token';
+  var t = function () { return I18N.t.apply(null, arguments); };
   var state = {
     range: 'day',
     metric: 'pv',
     statsData: null,
+    last: null,
     page: 1,
     pageSize: 20,
     q: '',
@@ -53,14 +55,14 @@
     }, opts.headers || {});
     return fetch(url, opts).then(function (res) {
       return res.json().catch(function () {
-        throw new Error('服务器返回了非 JSON 响应（HTTP ' + res.status + '）');
+        throw new Error(t('服务器返回了非 JSON 响应（HTTP {status}）', { status: res.status }));
       }).then(function (j) {
         if (res.status === 401) {
           clearToken();
           showLogin();
-          throw new Error(j.message || '未登录或登录已过期');
+          throw new Error(t(j.message || '未登录或登录已过期'));
         }
-        if (!j.success) throw new Error(j.message || '请求失败');
+        if (!j.success) throw new Error(t(j.message || '请求失败'));
         return j;
       });
     });
@@ -83,9 +85,9 @@
     var pwd = $('pwd').value;
     var errEl = $('loginErr');
     var btn = $('loginBtn');
-    if (!pwd) { errEl.textContent = '请输入口令'; errEl.classList.add('show'); return; }
+    if (!pwd) { errEl.textContent = t('请输入口令'); errEl.classList.add('show'); return; }
     errEl.classList.remove('show');
-    btn.disabled = true; btn.textContent = '登录中…';
+    btn.disabled = true; btn.textContent = t('登录中…');
     fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -98,15 +100,21 @@
         enterApp();
       })
       .catch(function (e) {
-        errEl.textContent = e.message || '登录失败';
+        errEl.textContent = t(e.message || '登录失败');
         errEl.classList.add('show');
       })
-      .finally(function () { btn.disabled = false; btn.textContent = '登 录'; });
+      .finally(function () { btn.disabled = false; btn.textContent = t('登 录'); });
+  }
+
+  function updateWho() {
+    var d = new Date();
+    var dateStr = I18N.getLang() === 'en' ? d.toLocaleDateString('en-US') : d.toLocaleDateString('zh-CN');
+    $('who').textContent = t('管理员 · {date}', { date: dateStr });
   }
 
   function enterApp() {
     showApp();
-    $('who').textContent = '管理员 · ' + new Date().toLocaleDateString('zh-CN');
+    updateWho();
     loadStats();
     loadVisits();
   }
@@ -128,15 +136,18 @@
     $('kTodayUv').textContent = d.summary.todayUv;
     $('kTotalPv').textContent = d.summary.totalPv;
     $('kTotalUv').textContent = d.summary.totalUv;
-    $('chartTitle').textContent = '访问趋势 · ' + d.title +
-      '（区间 PV ' + d.summary.rangePv + ' / UV ' + d.summary.rangeUv + '）';
+    $('chartTitle').textContent = t('访问趋势 · {title}（区间 PV {pv} / UV {uv}）', {
+      title: I18N.tTitle(d.title),
+      pv: d.summary.rangePv,
+      uv: d.summary.rangeUv,
+    });
   }
 
   function renderChart(d) {
     var wrap = $('chartWrap');
     var data = d.series;
     if (!data.length || d.summary.rangePv === 0) {
-      wrap.innerHTML = '<div class="chart-empty">所选时间段内暂无访问记录</div>';
+      wrap.innerHTML = '<div class="chart-empty">' + t('所选时间段内暂无访问记录') + '</div>';
       return;
     }
     var metric = state.metric;
@@ -204,32 +215,44 @@
   function loadVisits() {
     var qs = 'page=' + state.page + '&pageSize=' + state.pageSize + '&q=' + encodeURIComponent(state.q);
     api('/api/visits?' + qs)
-      .then(function (j) {
-        state.totalPages = j.totalPages;
-        renderTable(j.list);
-        $('pageInfo').textContent = '共 ' + j.total + ' 条记录，当前第 ' + j.page + ' / ' + j.totalPages + ' 页，每页 ' + j.pageSize + ' 条';
-        $('totalPages').textContent = j.totalPages;
-        $('pageInput').value = j.page;
-        $('firstBtn').disabled = j.page <= 1;
-        $('prevBtn').disabled = j.page <= 1;
-        $('nextBtn').disabled = j.page >= j.totalPages;
-        $('lastBtn').disabled = j.page >= j.totalPages;
-      })
+      .then(function (j) { state.last = j; renderVisits(j); })
       .catch(function (e) { toast(e.message, true); });
+  }
+
+  function renderVisits(j) {
+    state.totalPages = j.totalPages;
+    renderTable(j.list);
+    $('pageInfo').textContent = t('共 {total} 条记录，当前第 {page} / {pages} 页，每页 {size} 条', {
+      total: j.total, page: j.page, pages: j.totalPages, size: j.pageSize,
+    });
+    $('totalPages').textContent = j.totalPages;
+    $('pageInput').value = j.page;
+    $('firstBtn').disabled = j.page <= 1;
+    $('prevBtn').disabled = j.page <= 1;
+    $('nextBtn').disabled = j.page >= j.totalPages;
+    $('lastBtn').disabled = j.page >= j.totalPages;
+  }
+
+  /** 服务端返回的浏览器/系统文案本地化（未知、微信内置浏览器等） */
+  function tUaLab(s) {
+    if (I18N.getLang() !== 'en' || !s) return s;
+    if (s === '未知') return 'Unknown';
+    if (s === '爬虫/机器人') return 'Bot / robot';
+    return String(s).replace(/微信内置浏览器/, 'WeChat Browser');
   }
 
   function renderTable(rows) {
     var tb = $('tbody');
     if (!rows.length) {
-      tb.innerHTML = '<tr class="empty-row"><td colspan="8">暂无符合条件的访客记录</td></tr>';
+      tb.innerHTML = '<tr class="empty-row"><td colspan="8">' + t('暂无符合条件的访客记录') + '</td></tr>';
       return;
     }
     tb.innerHTML = rows.map(function (r) {
       var locParts = [r.country, r.region, r.city, r.district].filter(Boolean);
       var loc = esc(locParts.join(' / ')) || '<span class="muted">—</span>';
       var devCls = r.bot ? 'tag-bot' : (r.device === 'PC' ? 'tag-pc' : 'tag-mobile');
-      var devTxt = r.bot ? '爬虫' : r.device;
-      var ref = r.ref ? '<a href="' + esc(r.ref) + '" target="_blank" rel="noopener" title="' + esc(r.ref) + '">' + esc(shortHost(r.ref)) + '</a>' : '<span class="muted">直接访问</span>';
+      var devTxt = r.bot ? t('爬虫') : tUaLab(r.device);
+      var ref = r.ref ? '<a href="' + esc(r.ref) + '" target="_blank" rel="noopener" title="' + esc(r.ref) + '">' + esc(shortHost(r.ref)) + '</a>' : '<span class="muted">' + t('直接访问') + '</span>';
       var path = esc(r.path || '/');
       return '<tr>' +
         '<td class="time">' + fmtTime(r.ts) + '</td>' +
@@ -237,7 +260,7 @@
         '<td class="loc">' + loc + '</td>' +
         '<td>' + (esc(r.isp) || '<span class="muted">—</span>') + '</td>' +
         '<td><span class="tag ' + devCls + '">' + devTxt + '</span></td>' +
-        '<td>' + esc(r.browser) + '<br><span class="muted" style="font-size:12px;">' + esc(r.os) + '</span></td>' +
+        '<td>' + esc(tUaLab(r.browser)) + '<br><span class="muted" style="font-size:12px;">' + esc(tUaLab(r.os)) + '</span></td>' +
         '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;">' + ref + '</td>' +
         '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + path + '">' + path + '</td>' +
         '</tr>';
@@ -295,6 +318,13 @@
     var p = parseInt(this.value, 10);
     if (p >= 1 && p <= state.totalPages) { state.page = p; loadVisits(); }
     else this.value = state.page;
+  });
+
+  /* ---------------- 语言切换时重渲染动态内容 ---------------- */
+  I18N.onChange(function () {
+    if (state.statsData) { renderStats(state.statsData); renderChart(state.statsData); }
+    if (state.last) renderVisits(state.last);
+    if (getToken() && $('appView').classList.contains('on')) updateWho();
   });
 
   // 统计每 60 秒自动刷新（明细不自动跳页，避免打断查看）

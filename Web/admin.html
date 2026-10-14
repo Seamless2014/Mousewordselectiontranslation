@@ -153,6 +153,16 @@ a { color: var(--accent); }
   font-size: 12px; font-weight: 600; color: var(--muted); border-radius: 6px;
 }
 .seg button.on { background: var(--accent-grad); color: #fff; }
+.lang-switch {
+  display: inline-flex; background: var(--bg); border: 1px solid var(--rule);
+  border-radius: 999px; padding: 3px; gap: 2px;
+}
+.lang-switch button {
+  border: none; background: none; padding: 5px 12px;
+  font-size: 12px; font-weight: 700; color: var(--muted); border-radius: 999px;
+}
+.lang-switch button:hover { color: var(--ink); }
+.lang-switch button.on { background: var(--accent-grad); color: #fff; }
 .panel-bd { padding: 20px; }
 
 /* 图表 */
@@ -253,6 +263,7 @@ td.loc { white-space: normal; min-width: 150px; }
   <div class="topbar">
     <div class="logo"><span class="logo-icon">译</span>访客统计后台</div>
     <div class="right">
+      <div class="lang-switch" id="langSwitch"></div>
       <span class="who" id="who"></span>
       <button class="btn btn-ghost" id="logoutBtn">退出登录</button>
     </div>
@@ -341,6 +352,7 @@ td.loc { white-space: normal; min-width: 150px; }
 
 <div class="toast" id="toast"></div>
 
+<script src="i18n.js"></script>
 <script src="admin.js"></script>
 </body>
 </html>
