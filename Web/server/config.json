@@ -1,0 +1,6 @@
+{
+  "port": 8090,
+  "adminPassword": "admin123",
+  "tokenTtlMs": 86400000,
+  "geoTimeoutMs": 4000
+}

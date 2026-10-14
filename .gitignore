@@ -22,3 +22,6 @@ verify-v150-result.json
 
 # Trae IDE 临时目录
 .trae-html-share-packages/
+
+# 访客统计服务的数据文件（运行时生成，不入库）
+Web/server/data/
